@@ -14,7 +14,7 @@ from torchvision.utils import save_image
 
 
 if __name__ == '__main__':
-    vol_ds = TorchDataset('/run/media/dome/Data/data/torchvtk/CQ500')
+    vol_ds = TorchDataset('C:/Users/Luca/Uni/Differender/vtk_dat/')
     vol = vol_ds[0]['vol'].float()
     tf = get_tf('tf1', 128)
     raycaster = Raycaster(vol.shape[-3:], (800, 800), 128, jitter=False, max_samples=1)
