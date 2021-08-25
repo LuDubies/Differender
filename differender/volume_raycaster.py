@@ -3,6 +3,7 @@ from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 import taichi as ti
 import taichi_glsl as tl
 import numpy as np
+from enum import Enum
 
 @ti.func
 def low_high_frac(x: float):
@@ -475,8 +476,157 @@ class RaycastFunction(torch.autograd.Function):
                 torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev)), \
                 None, None, None, None
 
+# test decorator to create a dict of compositing functions
+def test_dec(comp, dict=None, key=None):
+    dict[key] = comp
+    
+    
+class Compositing(Enum):
+    Standard = 0
+    FirstHitDepth = 1
+    MaxOpacity = 2
+    MaxGradient = 3
+
+class DepthRaycaster(VolumeRaycaster):
+        def __init__(self,
+                 volume_resolution,
+                 render_resolution,
+                 max_samples=512,
+                 tf_resolution=128,
+                 fov=30.0,
+                 nearfar=(0.1, 100.0),
+                 mode=Compositing.MaxOpacity,
+                 threshold=0.1):
+            ''' Initializes Depth Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization '''
+
+            ''' Extends the VolumeRaycaster with multiple Depth compositing modes'''
+    
+            super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
+            self.mode = mode
+            self.threshold=threshold
+
+            self.composite_functions = {}
+            
+            # make dict of modes mapped to render functions
+            # add each function
+            # overwrite raycast nondiff
+            # use function from dict (mode is key)
+
+        def set_threshold(self, th):
+            self.threshold = th if th > 0 else 0
+
+        @ti.kernel
+        def raycast_nondiff(self, sampling_rate: float):
+            ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
+
+            Args:
+                sampling_rate (float): Sampling rate (multiplier with Nyquist frequence)
+            '''
+            for i, j in self.valid_sample_step_count:  # For all pixels
+                last_opacity = 0.0
+                for cnt in range(self.sample_step_nums[i, j]):
+                    look_from = self.cam_pos[None]
+                    opacity = 0.0
+                    if self.render_tape[i, j, 0].w < 0.99:
+                        tmax = self.exit[i, j]
+                        n_samples = self.sample_step_nums[i, j]
+                        ray_len = (tmax - self.entry[i, j])
+                        tmin = self.entry[
+                            i,
+                            j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
+                        vd = self.rays[i, j]
+                        t = float(cnt) / float(n_samples - 1)
+                        pos = look_from + tl.mix(
+                            tmin, tmax,
+                            t) * vd  # Current Pos
+                        light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
+                        intensity = self.sample_volume_trilinear(pos)
+                        sample_color = self.apply_transfer_function(intensity)
+                        opacity = 1.0 - ti.pow(1.0 - sample_color.w,
+                                            1.0 / sampling_rate)
+                        if sample_color.w > 1e-3:
+                            normal = self.get_volume_normal(pos)
+                            light_dir = (pos - light_pos).normalized(
+                            )  # Direction to light source
+                            n_dot_l = max(normal.dot(light_dir), 0.0)
+                            diffuse = self.diffuse * n_dot_l
+                            r = tl.reflect(light_dir,
+                                        normal)  # Direction of reflected light
+                            r_dot_v = max(r.dot(-vd), 0.0)
+                            specular = self.specular * pow(r_dot_v, self.shininess)
+
+                            current = self.render_tape[i,j,0]
+
+                            # call compositing function according to selected mode
+                            # ugly if block, waiting for 3.10 match capabilities
+                            shaded_color = tl.vec4(0.0)
+                            if self.mode == Compositing.Standard:
+                                shaded_color = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+
+                            elif self.mode == Compositing.FirstHitDepth:
+                                shaded_color = tl.vec4(t, t, t, 1) if opacity > 0.0 and current == tl.vec4(0) else current
+                                
+                            elif self.mode == Compositing.MaxOpacity:
+                                shaded_color = tl.vec4(t, t, t, opacity) if opacity > current.w else current
+
+                            elif self.mode == Compositing.MaxGradient:
+                                grad = opacity - last_opacity
+                                shaded_color = tl.vec4(t, t, t, grad) if grad > current.w else current
+
+                            else:
+                                shaded_color = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+
+                            # for Standard mode, add current sample to render tape according to prev opacity
+                            if self.mode == Compositing.Standard:
+                                self.render_tape[i,j,0] = (1.0 - self.render_tape[i, j, 0].w) * shaded_color + self.render_tape[i, j, 0]
+                            else: # for Depth Rendering just set the current color result
+                                self.render_tape[i,j,0] = shaded_color
+                        
+
+                    # save opacity to be able to calc a gradient
+                    last_opacity = opacity
+                
+                # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
+                if self.mode == Compositing.MaxGradient or self.mode == Compositing.MaxOpacity:
+                    self.render_tape[i, j, 0].w = 1
+
+        '''COMPOSITING FUNCTIONS'''
+
+        '''
+        # standard rendering
+        @ti.kernel
+        def standard(self, diffuse: float, specular: float, ambient: float, sample_color, opacity: float, light_color: tl.vec3):
+            return tl.vec4((diffuse + specular + ambient) * sample_color.xyz * opacity * light_color, opacity)
+
+        @ti.kernel
+        def fhd(self, current: tl.vec4, t: float, opacity: float):
+            result = current
+
+            if opacity > 0.0 and current == tl.vec4(0):
+                result = tl.vec4(t, t, t, 1)
+            
+            return result
+
+        @ti.kernel
+        def max_opacity(self, current: tl.vec4, t: float, opacity: float):
+            result = current
+            if opacity > current.w:
+                result = tl.vec4(t, t, t, opacity)
+            return result
+
+        @ti.kernel
+        def max_gradient(self, current: tl.vec4, t: float, opacity: float, last: float):
+            result = current
+            grad = opacity - last
+
+            if grad > current.w:
+                result = tl.vec4(t, t, t, grad)
+            return result
+        '''
+
 class Raycaster(torch.nn.Module):
-    def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512, fov=30.0, near=0.1, far=100.0, ti_kwargs={}):
+    def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512, fov=30.0, near=0.1, far=100.0, ti_kwargs={},
+                                                        compositing=Compositing.Standard):
         super().__init__()
         self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
         self.output_shape = output_shape
@@ -484,8 +634,8 @@ class Raycaster(torch.nn.Module):
         self.sampling_rate = sampling_rate
         self.jitter = jitter
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
-        self.vr = VolumeRaycaster(self.volume_shape, output_shape,
-            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far))
+        self.vr = DepthRaycaster(self.volume_shape, output_shape,
+            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far), mode=compositing)
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
         with torch.no_grad() as _, autocast(False) as _:
