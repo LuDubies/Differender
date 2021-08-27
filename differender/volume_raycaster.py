@@ -475,10 +475,6 @@ class RaycastFunction(torch.autograd.Function):
                 torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)), \
                 torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev)), \
                 None, None, None, None
-
-# test decorator to create a dict of compositing functions
-def test_dec(comp, dict=None, key=None):
-    dict[key] = comp
     
     
 class Compositing(Enum):
@@ -505,12 +501,6 @@ class DepthRaycaster(VolumeRaycaster):
             self.mode = mode
             self.threshold=threshold
 
-            self.composite_functions = {}
-            
-            # make dict of modes mapped to render functions
-            # add each function
-            # overwrite raycast nondiff
-            # use function from dict (mode is key)
 
         def set_threshold(self, th):
             self.threshold = th if th > 0 else 0
@@ -528,17 +518,19 @@ class DepthRaycaster(VolumeRaycaster):
                     look_from = self.cam_pos[None]
                     opacity = 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
-                        tmax = self.exit[i, j]
+                        tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
                         ray_len = (tmax - self.entry[i, j])
                         tmin = self.entry[
                             i,
                             j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                         vd = self.rays[i, j]
+
                         t = float(cnt) / float(n_samples - 1)
-                        pos = look_from + tl.mix(
-                            tmin, tmax,
-                            t) * vd  # Current Pos
+                        t_total = tl.mix(tmin, tmax, t) # save t for depth use
+                        pos = look_from + t_total * vd  # Current Pos
+
+
                         light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                         intensity = self.sample_volume_trilinear(pos)
                         sample_color = self.apply_transfer_function(intensity)
@@ -634,8 +626,8 @@ class Raycaster(torch.nn.Module):
         self.sampling_rate = sampling_rate
         self.jitter = jitter
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
-        self.vr = DepthRaycaster(self.volume_shape, output_shape,
-            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far), mode=compositing)
+        self.vr = VolumeRaycaster(self.volume_shape, output_shape,
+            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far))
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
         with torch.no_grad() as _, autocast(False) as _:
@@ -671,6 +663,11 @@ class Raycaster(torch.nn.Module):
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
                 return torch.flip(self.vr.output_rgba.to_torch(device=volume.device), (1, )).permute(2, 1, 0).contiguous()
+
+    def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
+        ''' seeks to mimic raycast_nondiff, but using the raycast method of the Volume raycaster
+            depth renderings can then be extracted from the render tape instead of during the rendering process'''
+        pass
 
     def forward(self, volume, tf, look_from):
         ''' Raycasts through `volume` using the transfer function `tf` from given camera position (volume is in [-1,1]^3, centered around 0)
