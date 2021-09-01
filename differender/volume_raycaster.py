@@ -364,6 +364,7 @@ class VolumeRaycaster():
     @ti.kernel
     def get_final_image(self):
         ''' Retrieves the final image from the `render_tape` to `output_rgba`. '''
+        '''
         for i, j in self.valid_sample_step_count:
             valid_sample_step_count = self.valid_sample_step_count[i, j] - 1
             ns = self.sample_step_nums[i, j]
@@ -371,6 +372,22 @@ class VolumeRaycaster():
             if valid_sample_step_count > self.max_valid_sample_step_count[None]:
                 self.max_valid_sample_step_count[
                     None] = valid_sample_step_count
+        '''
+        for i, j in self.valid_sample_step_count:
+            valid_sample_step_count = self.valid_sample_step_count[i, j] - 1
+            ns = self.sample_step_nums[i, j]
+            
+            # check along the render tape for the first hit
+            for x in range(ns):
+                if self.render_tape[i, j, x].w > 1e-3:
+                    t = 0.0
+                    t = x/(ns - 1)
+                    self.output_rgba[i, j] += tl.vec4(t, t, t, 1.0)
+                    break
+            if valid_sample_step_count > self.max_valid_sample_step_count[None]:
+                self.max_valid_sample_step_count[None] = valid_sample_step_count
+
+
 
     @ti.kernel
     def clear_framebuffer(self):
@@ -491,7 +508,7 @@ class DepthRaycaster(VolumeRaycaster):
                  tf_resolution=128,
                  fov=30.0,
                  nearfar=(0.1, 100.0),
-                 mode=Compositing.MaxOpacity,
+                 mode=Compositing.Standard,
                  threshold=0.1):
             ''' Initializes Depth Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization '''
 
@@ -626,8 +643,8 @@ class Raycaster(torch.nn.Module):
         self.sampling_rate = sampling_rate
         self.jitter = jitter
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
-        self.vr = VolumeRaycaster(self.volume_shape, output_shape,
-            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far))
+        self.vr = DepthRaycaster(self.volume_shape, output_shape,
+            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far), mode=compositing)
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
         with torch.no_grad() as _, autocast(False) as _:
