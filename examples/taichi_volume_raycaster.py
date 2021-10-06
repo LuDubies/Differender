@@ -154,7 +154,7 @@ class VolumeRaycaster():
         self.volume.from_numpy(volume.astype(np.float32))
 
     def set_tf_tex(self, tf_tex):
-        self.tf_tex.from_numpy(tf_tex.astype(np.float32))
+        self.tf_tex.from_torch(tf_tex.float())
 
     def set_reference(self, reference):
         self.reference.from_numpy(reference.astype(np.float32))
@@ -448,17 +448,9 @@ class VolumeRaycaster():
         self.raycast(sampling_rate)
         self.get_final_image()
 
-        # self.compute_loss()
-        # self.loss.grad[None] = 1.0
-        # self.compute_loss.grad()
-        reference_tensor = self.reference.to_torch(device=self.cuda)
-        output_rgba_tensor = self.output_rgba.to_torch(
-            device=self.cuda).requires_grad_(True)
-        loss = torch.nn.functional.mse_loss(output_rgba_tensor,
-                                            reference_tensor)
-        loss.backward()
-        self.loss.from_torch(loss)
-        self.output_rgba.grad.from_torch(output_rgba_tensor.grad)
+        self.compute_loss()
+        self.loss.grad[None] = 1.0
+        self.compute_loss.grad()
 
         self.get_final_image.grad()
         self.raycast.grad(sampling_rate)
@@ -504,7 +496,7 @@ if __name__ == '__main__':
                         help='Create Reference Images')
     parser.add_argument('--max-samples',
                         type=int,
-                        default=2048,
+                        default=1024,
                         help='Max number of samples to use in backward pass')
     parser.add_argument('--fw-sampling-rate',
                         type=float,
@@ -554,9 +546,10 @@ if __name__ == '__main__':
                 excepthook=True,
                 log_level=ti.TRACE,
                 kernel_profiler=True,
-                default_fp=ti.f32)
+                default_fp=ti.f32,
+                device_memory_GB=6.0)
     else:
-        ti.init(arch=ti.cuda, default_fp=ti.f32)
+        ti.init(arch=ti.cuda, default_fp=ti.f32, device_memory_GB=6.0)
     # Data
     tf = get_tf(args.target_tf, TF_RESOLUTION)
     tf_init = get_tf(args.init_tf, TF_RESOLUTION)
@@ -651,7 +644,9 @@ if __name__ == '__main__':
     elif args.task == 'forward':
         gui = ti.GUI("Volume Raycaster", res=RESOLUTION, fast_gui=True)
         # Setup Raycaster
+        print(vol, vol.shape, vol.dtype)
         vr.set_volume(vol)
+        print(tf, tf.shape, tf.dtype)
         vr.set_tf_tex(tf)
         # Render volume
         while gui.running:
