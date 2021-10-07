@@ -51,7 +51,11 @@ if __name__ == '__main__':
         raycaster.vr.compute_loss()
     print(f"Calculated loss is: {raycaster.vr.loss}")
     print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
-    print(f"depth_tape.grad is:\n{raycaster.vr.depth.grad}")
 
     image_tensor = torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1])
     save_image(image_tensor, 'tape_test_image.png')
+
+    depth_np = raycaster.vr.depth.to_numpy()
+    dg_np = raycaster.vr.depth.grad.to_numpy()
+    print(f"depth_field:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
+    print(f"depth_grad_field:  Shape: {dg_np.shape}, Max: {dg_np.max()}, Min: {dg_np.min()}, Mean: {dg_np.mean()}, Sum: {dg_np.sum()}")

@@ -49,16 +49,17 @@ if __name__ == '__main__':
     raycaster.vr.get_final_image()
     raycaster.vr.get_depth_image()
     raycaster.vr.compute_loss()
-    save_image(torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1]), 'grad_test_image.png')
+    
     print(f"Calculated loss is: {raycaster.vr.loss}")
-    print("Calculating gradients:")
     raycaster.vr.compute_loss.grad()
-    raycaster.vr.get_depth_image.grad()
-    raycaster.vr.get_final_image.grad()
+    #raycaster.vr.get_depth_image.grad()
+    #raycaster.vr.get_final_image.grad()
 
     depth_np = raycaster.vr.depth.to_numpy()
     dg_np = raycaster.vr.depth.grad.to_numpy()
     print(f"depth_field:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
     print(f"depth_grad_field:  Shape: {dg_np.shape}, Max: {dg_np.max()}, Min: {dg_np.min()}, Mean: {dg_np.mean()}, Sum: {dg_np.sum()}")
+
+    save_image(torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1]), 'grad_test_image.png')
 
     

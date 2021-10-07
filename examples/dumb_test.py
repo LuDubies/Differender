@@ -28,8 +28,9 @@ x[None] = 2
 
 print(imag_depth)
 
-with ti.Tape(loss):
-    calc_some_loss()
+
+calc_some_loss()
+calc_some_loss.grad()
 
 print(loss)
 #print(x.grad[None])

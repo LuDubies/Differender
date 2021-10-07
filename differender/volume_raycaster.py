@@ -682,7 +682,12 @@ class DepthRaycaster(VolumeRaycaster):
             for i,j in self.valid_sample_step_count:
                 self.loss[None] += ((self.depth[i,j] - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
                 ''' loss relativieren / anpassen auf anzahl pixel'''
-                    
+
+        def mach_sachn():
+            pass
+            # 
+            # for i, j in self.valid_sample_step_count:
+                    # apply grads
 
 
 class Raycaster(torch.nn.Module):
