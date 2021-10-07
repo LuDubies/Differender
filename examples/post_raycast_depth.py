@@ -32,8 +32,8 @@ if __name__ == '__main__':
     im = raycaster(vol[None], tf[None], lf[None])
     save_image(im, 'std_render.png')
 
-    save_image(raycaster.vr.depth_out, 'depth_render.png')
-
+    save_image(torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1]), 'depth_render.png')
+    print(f"Loss is: {raycaster.vr.loss}")
     # get compare image
     im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=16.0)
 

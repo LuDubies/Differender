@@ -28,31 +28,20 @@ if __name__ == '__main__':
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
     print(vol.shape, raycaster.volume_shape, tf.shape, lf)
-    vol = vol[0] # remove batch dimension
     
-    print("Calculating loss gradiend:")
+    # use raycaster.determine_batched to get the dimensions right
+    batched, bs, vol_in, tf_in, lf_in = raycaster._determine_batch(vol, tf, lf)
+    print(f"Batched: {batched}, VolShape: {vol_in.shape}")
+    
+    print("Calculating loss gradient:")
 
     ''' do the shit from autograd function here'''
     raycaster.vr.clear_grad()
-    raycaster.vr.set_cam_pos(lf)
-    raycaster.vr.set_volume(vol)
-    raycaster.vr.set_tf_tex(tf)
+    raycaster.vr.set_cam_pos(lf_in)
+    raycaster.vr.set_volume(vol_in)
+    raycaster.vr.set_tf_tex(tf_in)
     raycaster.vr.clear_framebuffer()
     raycaster.vr.compute_entry_exit(1.0, False)
-
-    ''' use manual grad() funktions to get gradients
-    raycaster.vr.raycast(1.0)
-    raycaster.vr.get_final_image()
-    raycaster.vr.get_depth_image()
-    raycaster.vr.compute_loss()
-    print(f"Calculated loss is: {raycaster.vr.loss}")
-    raycaster.vr.compute_loss.grad()
-    print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
-    raycaster.vr.get_depth_image.grad()
-    print(f"depth_tape.grad is:\n{raycaster.vr.depth.grad}")
-    raycaster.vr.get_final_image.grad()
-    '''
-
 
     ''' Tape syntax'''
     with ti.Tape(raycaster.vr.loss):
@@ -60,8 +49,9 @@ if __name__ == '__main__':
         raycaster.vr.get_final_image()
         raycaster.vr.get_depth_image()
         raycaster.vr.compute_loss()
-        print(f"Calculated loss is: {raycaster.vr.loss}")
-        print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
-        print(f"depth_tape.grad is:\n{raycaster.vr.depth.grad}")
+    print(f"Calculated loss is: {raycaster.vr.loss}")
+    print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
+    print(f"depth_tape.grad is:\n{raycaster.vr.depth.grad}")
 
-    save_image(raycaster.vr.depth_out, 'grad_result_image.png')
+    image_tensor = torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1])
+    save_image(image_tensor, 'tape_test_image.png')

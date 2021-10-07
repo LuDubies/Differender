@@ -429,7 +429,7 @@ class RaycastFunction(torch.autograd.Function):
                 vr.raycast(sampling_rate)
                 vr.get_final_image()
                 vr.get_depth_image()
-                vr.depth_out = torch.rot90(vr.depth.to_torch(device=volume.device), 1, [0, 1])
+                vr.compute_loss()
                 result[i] = vr.output_rgba.to_torch(device=volume.device)
             return result
         else: # Non-batched, single item
@@ -443,7 +443,7 @@ class RaycastFunction(torch.autograd.Function):
             vr.raycast(sampling_rate)
             vr.get_final_image()
             vr.get_depth_image()
-            vr.depth_out = vr.depth_out = torch.rot90(vr.depth.to_torch(device=volume.device), 1, [0, 1])
+            vr.compute_loss()
             return vr.output_rgba.to_torch(device=volume.device)
 
     @staticmethod
@@ -493,6 +493,7 @@ class Compositing(Enum):
     Similarity = 4
     WYSIWYP = 5
 
+@ti.data_oriented
 class DepthRaycaster(VolumeRaycaster):
         def __init__(self,
                  volume_resolution,
@@ -514,9 +515,8 @@ class DepthRaycaster(VolumeRaycaster):
             render_tiles = tuple(map(lambda x: x // 8, render_resolution))
             self.depth = ti.field(ti.f32, needs_grad=True)
             self.depth_tape = ti.field(ti.f32, needs_grad=True)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
-            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
-            self.depth_out = None
+            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth, self.depth.grad)
+            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape, self.depth_tape.grad)
 
         def set_threshold(self, th):
             self.threshold = th if th > 0 else 0
@@ -607,8 +607,6 @@ class DepthRaycaster(VolumeRaycaster):
                 self.output_rgba[i, j] += self.render_tape[i, j,  max(0, ns - 1)]
                 if valid_sample_step_count > self.max_valid_sample_step_count[None]:
                     self.max_valid_sample_step_count[None] = valid_sample_step_count
-            
-            # TODO MABYBE move depth into sam i, j loop as standard image extraction
 
             ''' Write the depth into the depth-field according to chosen mode. '''
             if ti.static(self.mode == Compositing.FirstHitDepth):
@@ -677,7 +675,6 @@ class DepthRaycaster(VolumeRaycaster):
             for i, j in self.valid_sample_step_count:
                 ns = self.sample_step_nums[i, j] + 1  # + 1 due to depth tape offset of 1
                 self.depth[i, j] += self.depth_tape[i, j,  max(0, ns - 1)]
-            # fix image rotation
 
 
         @ti.kernel

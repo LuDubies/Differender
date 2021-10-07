@@ -28,15 +28,19 @@ if __name__ == '__main__':
     lf = in_circles(1.7 * math.pi).float().to('cuda')
     print(vol.device)
     print(vol.shape, raycaster.volume_shape, tf.shape, lf)
-    vol = vol[0] # remove batch dimension
     
-    print("Calculating loss gradiend:")
+    # use raycaster.determine_batched to get the dimensions right
+    batched, bs, vol_in, tf_in, lf_in = raycaster._determine_batch(vol, tf, lf)
+    print(f"Batched: {batched}, VolShape: {vol_in.shape}")
+
+    
+    print("Calculating loss:")
 
     ''' do the shit from autograd function here'''
     raycaster.vr.clear_grad()
-    raycaster.vr.set_cam_pos(lf)
-    raycaster.vr.set_volume(vol)
-    raycaster.vr.set_tf_tex(tf)
+    raycaster.vr.set_cam_pos(lf_in)
+    raycaster.vr.set_volume(vol_in)
+    raycaster.vr.set_tf_tex(tf_in)
     raycaster.vr.clear_framebuffer()
     raycaster.vr.compute_entry_exit(1.0, False)
 
@@ -45,12 +49,16 @@ if __name__ == '__main__':
     raycaster.vr.get_final_image()
     raycaster.vr.get_depth_image()
     raycaster.vr.compute_loss()
-    raycaster.vr.depth_out = torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1])
+    save_image(torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1]), 'grad_test_image.png')
     print(f"Calculated loss is: {raycaster.vr.loss}")
+    print("Calculating gradients:")
     raycaster.vr.compute_loss.grad()
-    print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
     raycaster.vr.get_depth_image.grad()
-    print(f"depth_tape.grad is:\n{raycaster.vr.depth.grad}")
     raycaster.vr.get_final_image.grad()
 
-    save_image(raycaster.vr.depth_out, 'grad_result_image.png')
+    depth_np = raycaster.vr.depth.to_numpy()
+    dg_np = raycaster.vr.depth.grad.to_numpy()
+    print(f"depth_field:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
+    print(f"depth_grad_field:  Shape: {dg_np.shape}, Max: {dg_np.max()}, Min: {dg_np.min()}, Mean: {dg_np.mean()}, Sum: {dg_np.sum()}")
+
+    
