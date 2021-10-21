@@ -101,13 +101,13 @@ class VolumeRaycaster():
         render_resolution = tuple(map(lambda d: d // 8, render_resolution))
         ti.root.dense(ti.ijk,
                       volume_resolution).dense(ti.ijk,
-                                               (4, 4, 4)).place(self.volume)
+                                               (4, 4, 4)).place(self.volume, self.volume.grad)
         ti.root.dense(ti.ijk, (*render_resolution, max_samples)).dense(
-            ti.ijk, (8, 8, 1)).place(self.render_tape)
+            ti.ijk, (8, 8, 1)).place(self.render_tape, self.render_tape.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
             self.valid_sample_step_count, self.sample_step_nums)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
-            self.output_rgba)
+            self.output_rgba, self.output_rgba.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
             self.entry, self.exit)
         ti.root.dense(ti.ij,
@@ -116,7 +116,6 @@ class VolumeRaycaster():
         ti.root.dense(ti.i, tf_resolution).place(self.tf_tex)
         ti.root.dense(ti.i, tf_resolution).place(self.tf_tex.grad)
         ti.root.place(self.cam_pos)
-        ti.root.lazy_grad()
 
     def set_volume(self, volume):
         self.volume.from_torch(volume.float())
@@ -393,7 +392,6 @@ class VolumeRaycaster():
         self.render_tape.grad.fill(0.0)
         self.output_rgba.grad.fill(0.0)
 
-
 class RaycastFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
@@ -466,6 +464,7 @@ class RaycastFunction(torch.autograd.Function):
                 ctx.vr.raycast(ctx.sampling_rate)
                 ctx.vr.get_final_image()
                 ctx.vr.output_rgba.grad.from_torch(grad_output[i])
+                # ctx.vr.depth.grad.from_torch(grad_output[i])
                 ctx.vr.get_final_image.grad()
                 ctx.vr.raycast.grad(ctx.sampling_rate)
 
@@ -476,6 +475,7 @@ class RaycastFunction(torch.autograd.Function):
         else: # Non-batched, single item
             ctx.vr.clear_grad()
             ctx.vr.output_rgba.grad.from_torch(grad_output)
+            # ctx.vr.depth.grad.from_torch(grad_output)
             ctx.vr.get_final_image.grad()
             ctx.vr.raycast.grad(ctx.sampling_rate)
 
@@ -510,7 +510,7 @@ class DepthRaycaster(VolumeRaycaster):
     
             super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
             self.mode = mode
-            self.threshold=threshold
+            self.threshold= ti.field(ti.f32, ())
 
             render_tiles = tuple(map(lambda x: x // 8, render_resolution))
             self.depth = ti.field(ti.f32, needs_grad=True)
@@ -608,47 +608,51 @@ class DepthRaycaster(VolumeRaycaster):
                 if valid_sample_step_count > self.max_valid_sample_step_count[None]:
                     self.max_valid_sample_step_count[None] = valid_sample_step_count
 
+        @ti.kernel
+        def calc_depth_information(self):
             ''' Write the depth into the depth-field according to chosen mode. '''
-            if ti.static(self.mode == Compositing.FirstHitDepth):
-                for i, j in self.valid_sample_step_count:            
-                    # check along the render tape for the first hit
-                    for x in range(self.sample_step_nums[i, j]):
-                        if self.render_tape[i, j, x].w > 1e-3:
-                            t = float(x/(self.sample_step_nums[i, j] - 1))
-                            if self.depth_tape[i, j, x] == 0.0:
-                                self.depth_tape[i, j, x + 1] = t
-                            else:
-                                self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
+            #if ti.static(self.mode == Compositing.FirstHitDepth):
+            for i, j in self.valid_sample_step_count:            
+                # check along the render tape for the first hit
+                for x in range(self.sample_step_nums[i, j]):
+                    if self.render_tape[i, j, x].w > 1e-3:
+                        t = float(x/(self.sample_step_nums[i, j] - 1))
+                        if self.depth_tape[i, j, x] == 0.0:
+                            self.depth_tape[i, j, x + 1] = t
+                        else:
+                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
 
             '''
             if ti.static(self.mode == Compositing.MaxGradient):
                 for i, j in self.valid_sample_step_count:
-                    ns = self.sample_step_nums[i, j]
-                    maxg = 0.0
-                    x_at_max = 0
                     # note the biggest gradient along the ray
-                    for x in range(1, ns):
-                        currg = self.render_tape[i,j,x].w - self.render_tape[i,j,x-1].w
-                        maxg = max(currg, maxg)
-                        if maxg == currg:
-                            x_at_max = x
-
-                    t = float(x_at_max/(ns -1))
-                    self.depth[i, j] = t
+                    for x in range(self.sample_step_nums[i, j]):
+                        currg = self.render_tape[i,j,x+1].w - self.render_tape[i,j,x].w
+                        if currg > self.threshold[None]:
+                            self.threshold[None] = currg
+                            t = float(x/(self.sample_step_nums[i, j] - 1))
+                            self.depth_tape[i, j, x + 1] = t
+                        else:
+                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
+                        if x == self.sample_step_nums[i, j] -1:
+                            # reset threshold for next pixel
+                            self.threshold[None] = 0
 
             if ti.static(self.mode == Compositing.MaxOpacity):
                 for i, j in self.valid_sample_step_count:
-                    ns = self.sample_step_nums[i, j]
-                    maxo = 0.0
-                    x_at_max = 0
                     # note the biggest opacity along the ray
-                    for x in range(ns):
-                        if self.render_tape[i, j, x].w > maxo:
-                            maxo = self.render_tape[i, j, x].w
-                            x_at_max = x
-       
-                    t = float(x_at_max/(ns -1))
-                    self.depth[i, j] = t
+                    for x in range(self.sample_step_nums[i, j]):
+                        curro = self.render_tape[i, j, x + 1].w
+                        if curro > self.threshold[None]:
+                            self.threshold[None] = curro
+                            t = float(x/(self.sample_step_nums[i, j] - 1))
+                            self.depth_tape[i, j, x + 1] = t
+                        else:
+                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
+                        if x == self.sample_step_nums[i, j] -1:
+                            # reset threshold for next pixel
+                            self.threshold[None] = 0
+            
             
             if ti.static(self.mode == Compositing.Similarity):
                 # find pixel that has the highest similarity score with the resulting pixel
@@ -681,13 +685,22 @@ class DepthRaycaster(VolumeRaycaster):
         def compute_loss(self):
             for i,j in self.valid_sample_step_count:
                 self.loss[None] += ((self.depth[i,j] - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
-                ''' loss relativieren / anpassen auf anzahl pixel'''
 
-        def mach_sachn():
-            pass
-            # 
-            # for i, j in self.valid_sample_step_count:
-                    # apply grads
+        @ti.kernel
+        def clear_loss(self):
+            self.loss[None] = 0.0
+            
+        @ti.kernel
+        def mach_sachn(self):
+            for i, j in self.valid_sample_step_count:
+                self.depth[i, j] -= 10 * self.depth.grad[i, j]
+
+        
+        def clear_grad(self):
+            super().clear_grad()
+            self.depth.grad.fill(0.0)
+            self.depth_tape.grad.fill(0.0)
+
 
 
 class Raycaster(torch.nn.Module):

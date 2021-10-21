@@ -46,12 +46,11 @@ if __name__ == '__main__':
     ''' Tape syntax'''
     with ti.Tape(raycaster.vr.loss):
         raycaster.vr.raycast(1.0)
-        raycaster.vr.get_final_image()
+        raycaster.vr.calc_depth_information()
         raycaster.vr.get_depth_image()
         raycaster.vr.compute_loss()
 
     print(f"Calculated loss is: {raycaster.vr.loss}")
-    print(f"depth.grad is:\n{raycaster.vr.depth.grad}")
 
     image_tensor = torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1])
     save_image(image_tensor, 'tape_test_image.png')
@@ -61,6 +60,16 @@ if __name__ == '__main__':
     print(f"depth_field:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
     print(f"depth_grad_field:  Shape: {dg_np.shape}, Max: {dg_np.max()}, Min: {dg_np.min()}, Mean: {dg_np.mean()}, Sum: {dg_np.sum()}")
 
+    dtape_grad_np = raycaster.vr.depth_tape.grad.to_numpy()
+    print(f"depthtape_grad:  Shape: {dtape_grad_np.shape}, Max: {dtape_grad_np.max()}, Min: {dtape_grad_np.min()}, Mean: {dtape_grad_np.mean()}, Sum: {dtape_grad_np.sum()}")
+
+    rendertape_grad_np = raycaster.vr.render_tape.grad.to_numpy()
+    print(f"rendertape_grad:  Shape: {rendertape_grad_np.shape}, Max: {rendertape_grad_np.max()}, Min: {rendertape_grad_np.min()}, Mean: {rendertape_grad_np.mean()}, Sum: {rendertape_grad_np.sum()}")
+
+    tf_grad_np = raycaster.vr.tf_tex.grad.to_numpy()
+    print(f"tf_grad:  Shape: {tf_grad_np.shape}, Max: {tf_grad_np.max()}, Min: {tf_grad_np.min()}, Mean: {tf_grad_np.mean()}, Sum: {tf_grad_np.sum()}")
+
+    """
     print("\nTesting grad application:")
     step = 0
     donezo = False
@@ -79,4 +88,5 @@ if __name__ == '__main__':
             donezo = True
         
         step+=1
+    """
 
