@@ -382,8 +382,6 @@ class VolumeRaycaster():
         for i, j in self.valid_sample_step_count:
             self.valid_sample_step_count[i, j] = 1
             self.output_rgba[i, j] = tl.vec4(0.0)
-        for i, j in self.depth:
-            self.depth[i,j] = 0.0
 
     def clear_grad(self):
         ''' Clears the Taichi gradients. '''
@@ -614,13 +612,13 @@ class DepthRaycaster(VolumeRaycaster):
             #if ti.static(self.mode == Compositing.FirstHitDepth):
             for i, j in self.valid_sample_step_count:            
                 # check along the render tape for the first hit
-                for x in range(self.sample_step_nums[i, j]):
-                    if self.render_tape[i, j, x].w > 1e-3:
-                        t = float(x/(self.sample_step_nums[i, j] - 1))
-                        if self.depth_tape[i, j, x] == 0.0:
-                            self.depth_tape[i, j, x + 1] = t
-                        else:
-                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
+                for x in range(1, self.sample_step_nums[i, j]):
+                    if self.render_tape[i, j, x].w > 1e-3 and self.depth_tape[i, j, x - 1] == 0.0:
+                        t = ti.cast((x/(self.sample_step_nums[i, j] - 1)), ti.f32)
+                        self.depth_tape[i, j, x] = t
+                    else:
+                        self.depth_tape[i, j, x] = self.depth_tape[i, j, x -1]
+
 
             '''
             if ti.static(self.mode == Compositing.MaxGradient):
@@ -673,7 +671,7 @@ class DepthRaycaster(VolumeRaycaster):
                     self.depth[i, j] = t
             '''
 
-        # pull depth image from depth_tape like get_final_image() the standard render from render_tape
+        # get depth image from depth_tape like get_final_image() ges the standard render from render_tape
         @ti.kernel
         def get_depth_image(self):
             for i, j in self.valid_sample_step_count:
@@ -695,7 +693,19 @@ class DepthRaycaster(VolumeRaycaster):
             for i, j in self.valid_sample_step_count:
                 self.depth[i, j] -= 10 * self.depth.grad[i, j]
 
-        
+        @ti.kernel
+        def clear_framebuffer(self):
+            self.max_valid_sample_step_count[None] = 0
+            for i, j, k in self.render_tape:
+                self.render_tape[i, j, k] = tl.vec4(0.0)
+            for i, j in self.valid_sample_step_count:
+                self.valid_sample_step_count[i, j] = 1
+                self.output_rgba[i, j] = tl.vec4(0.0)
+            for i, j in self.depth:
+                self.depth[i, j] = 0.0
+            for i, j, k in self.depth_tape:
+                self.depth_tape[i, j, k] = 0.0
+
         def clear_grad(self):
             super().clear_grad()
             self.depth.grad.fill(0.0)
