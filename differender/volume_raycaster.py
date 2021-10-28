@@ -343,7 +343,7 @@ class VolumeRaycaster():
                                            1.0 / sampling_rate)
 
                     
-                    if sample_color.w > 1e-3:
+                    if sample_color.w > 1e-3 and self.depth_tape[i, j, sample_idx - 1] == 0.0:
                         self.depth_tape[i, j, sample_idx] = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))     
                     else:
                         self.depth_tape[i, j, sample_idx] = self.depth_tape[i, j, sample_idx-1]
@@ -452,7 +452,7 @@ class VolumeRaycaster():
         self.valid_sample_step_count.fill(1)
         self.output_rgba.fill(tl.vec4(0.0))
         self.depth.fill(0.0)
-        self.depth_tape.fill(2.0)
+        self.depth_tape.fill(0.0)
 
     def clear_grad(self):
         ti.sync()
