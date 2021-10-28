@@ -21,7 +21,7 @@ if __name__ == '__main__':
     vol = vol_ds[1]['vol'].float()
     tf = get_tf('tf1', 128)
 
-    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048, compositing=Compositing.FirstHitDepth, ti_kwargs={'device_memory_GB': 4.0})
+    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048, ti_kwargs={'device_memory_GB': 4.0})
 
     vol = vol.to('cuda').requires_grad_(True)
     tf = tf.to('cuda').requires_grad_(True)
@@ -30,6 +30,7 @@ if __name__ == '__main__':
     print(vol.shape, raycaster.volume_shape, tf.shape, lf)
 
     im = raycaster(vol[None], tf[None], lf[None])
+    print(im.shape)
     save_image(im, 'std_render.png')
 
     save_image(torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1]), 'depth_render.png')

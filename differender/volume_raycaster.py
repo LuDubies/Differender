@@ -63,11 +63,11 @@ class VolumeRaycaster():
     def __init__(self,
                  volume_resolution,
                  render_resolution,
-                 background_color=0.0,
                  max_samples=512,
                  tf_resolution=128,
                  fov=30.0,
-                 nearfar=(0.1, 100.0)):
+                 nearfar=(0.1, 100.0),
+                 background_color=0.0):
         ''' Initializes Volume Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization
 
         Args:
@@ -105,25 +105,26 @@ class VolumeRaycaster():
         self.cam_pos = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
         self.cam_pos_field = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
 
+        # add depth tape and depth_out
+        self.depth = ti.field(ti.f32, needs_grad=True)
+        self.depth_tape = ti.field(ti.f32, needs_grad=True)
+
         volume_resolution = tuple(map(lambda d: d // 4, volume_resolution))
         render_resolution = tuple(map(lambda d: d // 8, render_resolution))
-        ti.root.dense(ti.ijk,
-                      volume_resolution).dense(ti.ijk,
-                                               (4, 4, 4)).place(self.volume, self.volume.grad)
+        ti.root.dense(ti.ijk, volume_resolution).dense(ti.ijk, (4, 4, 4)).place(self.volume, self.volume.grad)
         ti.root.dense(ti.ijk, (*render_resolution, max_samples)).dense(
             ti.ijk, (8, 8, 1)).place(self.render_tape, self.render_tape.grad, self.pos_tape, self.pos_tape.grad)
 
-        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
-            self.valid_sample_step_count, self.sample_step_nums)
-        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
-            self.output_rgba, self.output_rgba.grad)
-        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(
-            self.entry, self.entry.grad, self.exit, self.exit.grad)
+        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.valid_sample_step_count, self.sample_step_nums)
+        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.output_rgba, self.output_rgba.grad)
+        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.entry, self.entry.grad, self.exit, self.exit.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.rays, self.rays.grad)
-        ti.root.dense(ti.i, tf_resolution).place(self.tf_tex, self.tf_tex.grad)
+        ti.root.dense(ti.i, (tf_resolution)).place(self.tf_tex, self.tf_tex.grad)
         ti.root.place(self.cam_pos, self.cam_pos.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.cam_pos_field, self.cam_pos_field.grad)
-
+        ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.depth, self.depth.grad)
+        ti.root.dense(ti.ijk, (*render_resolution, max_samples)).dense(
+            ti.ijk, (8, 8, 1)).place(self.depth_tape, self.depth_tape.grad)
 
     def set_volume(self, volume):
         self.volume.from_torch(volume.float())
@@ -334,15 +335,20 @@ class VolumeRaycaster():
                         j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                     vd = self.rays[i, j]
                     self.pos_tape[i,j, sample_idx] = look_from + tl.mix(
-                        tmin, tmax,
-                        float(sample_idx) /
-                        float(n_samples - 1)) * vd  # Current Pos
+                        tmin, tmax, float(sample_idx) / float(n_samples - 1)) * vd  # Current Pos
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(self.pos_tape[i,j, sample_idx])
                     sample_color = self.apply_transfer_function(intensity)
                     opacity = 1.0 - ti.pow(1.0 - sample_color.w,
                                            1.0 / sampling_rate)
-                    # if sample_color.w > 1e-3:
+
+                    
+                    if sample_color.w > 1e-3:
+                        self.depth_tape[i, j, sample_idx] = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))     
+                    else:
+                        self.depth_tape[i, j, sample_idx] = self.depth_tape[i, j, sample_idx-1]
+
+
                     normal = self.get_volume_normal(self.pos_tape[i,j, sample_idx])
                     light_dir = (
                         self.pos_tape[i,j, sample_idx] -
@@ -363,6 +369,14 @@ class VolumeRaycaster():
                 else:
                     self.render_tape[i, j, sample_idx] = self.render_tape[
                         i, j, sample_idx - 1]
+
+    @ti.func
+    def calc_depth(self, i, j, sample_idx, t, sample_color, dt):
+        if sample_color.w > 1e-3:
+            dt[i, j, sample_idx] = min(t, dt[i, j, sample_idx-1])
+        else:
+            dt[i, j, sample_idx] = dt[i, j, sample_idx-1]
+
 
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float):
@@ -437,6 +451,8 @@ class VolumeRaycaster():
         self.render_tape.fill(tl.vec4(0.0))
         self.valid_sample_step_count.fill(1)
         self.output_rgba.fill(tl.vec4(0.0))
+        self.depth.fill(0.0)
+        self.depth_tape.fill(2.0)
 
     def clear_grad(self):
         ti.sync()
@@ -449,6 +465,8 @@ class VolumeRaycaster():
         self.entry.grad.fill(0.0)
         self.exit.grad.fill(0.0)
         self.rays.grad.fill(tl.vec3(0.0))
+        self.depth.grad.fill(0.0)
+        self.depth_tape.grad.fill(0.0)
 
     @ti.kernel
     def grad_nan_to_num(self):
@@ -460,6 +478,15 @@ class VolumeRaycaster():
                 self.entry.grad[i,j] = 0.0
             if tl.isnan(self.exit.grad[i,j]):
                 self.exit.grad[i,j] = 0.0
+
+    @ti.kernel
+    def compute_loss(self):
+        for i,j in self.valid_sample_step_count:
+            self.loss[None] += ((self.output_rgba[i,j].w - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
+
+    @ti.kernel
+    def clear_loss(self):
+        self.loss[None] = 0.0
 
 class RaycastFunction(torch.autograd.Function):
     @staticmethod
@@ -497,7 +524,6 @@ class RaycastFunction(torch.autograd.Function):
                 # vr.compute_entry_exit(sampling_rate, jitter)
                 vr.raycast(sampling_rate)
                 vr.get_final_image()
-                vr.get_depth_image()
                 vr.compute_loss()
                 result[i] = vr.output_rgba.to_torch(device=volume.device)
             return result
@@ -513,7 +539,6 @@ class RaycastFunction(torch.autograd.Function):
             # vr.compute_entry_exit(sampling_rate, jitter)
             vr.raycast(sampling_rate)
             vr.get_final_image()
-            vr.get_depth_image()
             vr.compute_loss()
             return vr.output_rgba.to_torch(device=volume.device)
 
@@ -602,6 +627,7 @@ class DepthRaycaster(VolumeRaycaster):
                  tf_resolution=128,
                  fov=30.0,
                  nearfar=(0.1, 100.0),
+                 background_color=0.0,
                  mode=Compositing.Standard,
                  threshold=0.1):
             ''' Initializes Depth Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization '''
@@ -816,8 +842,8 @@ class DepthRaycaster(VolumeRaycaster):
 
 
 class Raycaster(torch.nn.Module):
-    def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512, fov=30.0, near=0.1, far=100.0, ti_kwargs={},
-                                                        compositing=Compositing.Standard):
+    def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
+     fov=30.0, near=0.1, far=100.0, ti_kwargs={}, background_color=0.0):
         super().__init__()
         self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
         self.output_shape = output_shape
@@ -826,8 +852,8 @@ class Raycaster(torch.nn.Module):
         self.jitter = jitter
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
 
-        self.vr = VolumeRaycaster(self.volume_shape, output_shape, background_color=background_color,
-            max_samples=max_samples, tf_resolution=tf_shape, fov=fov, nearfar=(near, far), mode=compositing)
+        self.vr = VolumeRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
+         fov=fov, nearfar=(near, far), background_color=background_color)
 
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):

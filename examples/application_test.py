@@ -20,8 +20,10 @@ if __name__ == '__main__':
     vol_ds = TorchDataset('C:/Users/luca/Repos/Differender/vtk_dat/')
     vol = vol_ds[1]['vol'].float()
     tf = get_tf('tf1', 128)
+    sr = 1.0
 
-    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048, compositing=Compositing.FirstHitDepth, ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True})
+    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=sr, max_samples=2048,
+     ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True})
 
     vol = vol.to('cuda').requires_grad_(True)
     tf = tf.to('cuda').requires_grad_(True)
@@ -34,27 +36,36 @@ if __name__ == '__main__':
     print(f"Batched: {batched}, VolShape: {vol_in.shape}")
     
     print("Calculating loss gradient:")
+    vr = raycaster.vr
 
     ''' do the shit from autograd function here'''
-    raycaster.vr.clear_grad()
-    raycaster.vr.set_cam_pos(lf_in)
-    raycaster.vr.set_volume(vol_in)
-    raycaster.vr.set_tf_tex(tf_in)
-    raycaster.vr.clear_framebuffer()
-    raycaster.vr.compute_entry_exit(1.0, False)
+    vr.clear_grad()
+    vr.set_cam_pos(lf_in)
+    vr.set_volume(vol_in)
+    vr.set_tf_tex(tf_in)
+    vr.clear_framebuffer()
+    vr.compute_rays()
+    vr.compute_intersections(sr, 0)
 
     ''' Tape syntax'''
-    with ti.Tape(raycaster.vr.loss):
-        raycaster.vr.raycast(1.0)
-        raycaster.vr.calc_depth_information()
-        raycaster.vr.get_depth_image()
-        raycaster.vr.compute_loss()
+    with ti.Tape(vr.loss):
+        vr.raycast(sr)
+        vr.get_final_image()
+        vr.compute_loss()
 
-    print(f"Calculated loss is: {raycaster.vr.loss}")
+    print(f"Calculated loss is: {vr.loss}")
 
-    image_tensor = torch.rot90(raycaster.vr.depth.to_torch(device=vol.device), 1, [0, 1])
+    dtape_np = raycaster.vr.depth_tape.to_numpy()
+    print(f"depthtape:  Shape: {dtape_np.shape}, Max: {dtape_np.max()}, Min: {dtape_np.min()}, Mean: {dtape_np.mean()}, Sum: {dtape_np.sum()}")
+
+    # image_tensor = torch.rot90(vr.output_rgba.to_torch(device=vol.device), 1, [0, 1])
+    print(vr.output_rgba.shape)
+    image_tensor = vr.output_rgba.to_torch(device=vol.device)
     save_image(image_tensor, 'tape_test_image.png')
 
+
+
+    """
     depth_np = raycaster.vr.depth.to_numpy()
     dg_np = raycaster.vr.depth.grad.to_numpy()
     print(f"depth_field:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
@@ -69,7 +80,7 @@ if __name__ == '__main__':
     tf_grad_np = raycaster.vr.tf_tex.grad.to_numpy()
     print(f"tf_grad:  Shape: {tf_grad_np.shape}, Max: {tf_grad_np.max()}, Min: {tf_grad_np.min()}, Mean: {tf_grad_np.mean()}, Sum: {tf_grad_np.sum()}")
 
-    """
+    
     print("\nTesting grad application:")
     step = 0
     donezo = False
