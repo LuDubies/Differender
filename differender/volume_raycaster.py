@@ -3,8 +3,10 @@ import torch
 from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 import taichi as ti
 import taichi_glsl as tl
+import matplotlib.pyplot as plt
 import numpy as np
 from enum import Enum
+from typing import Union
 
 @ti.func
 def low_high_frac(x: float):
@@ -370,14 +372,6 @@ class VolumeRaycaster():
                     self.render_tape[i, j, sample_idx] = self.render_tape[
                         i, j, sample_idx - 1]
 
-    @ti.func
-    def calc_depth(self, i, j, sample_idx, t, sample_color, dt):
-        if sample_color.w > 1e-3:
-            dt[i, j, sample_idx] = min(t, dt[i, j, sample_idx-1])
-        else:
-            dt[i, j, sample_idx] = dt[i, j, sample_idx-1]
-
-
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float):
         ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
@@ -445,6 +439,12 @@ class VolumeRaycaster():
                 self.max_valid_sample_step_count[
                     None] = valid_sample_step_count
 
+    @ti.kernel
+    def get_depth_image(self):
+        for i, j in self.valid_sample_step_count:
+            ns = tl.clamp(self.sample_step_nums[i, j], 1, self.max_samples-1)
+            self.depth[i, j] += self.depth_tape[i, j, ns - 1]
+
     def clear_framebuffer(self):
         ''' Clears the framebuffer `output_rgba` and the `render_tape`'''
         self.max_valid_sample_step_count.fill(0)
@@ -482,11 +482,37 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_loss(self):
         for i,j in self.valid_sample_step_count:
-            self.loss[None] += ((self.output_rgba[i,j].w - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
+            self.loss[None] += ((self.depth[i,j] - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
 
     @ti.kernel
     def clear_loss(self):
         self.loss[None] = 0.0
+
+    def visualize_ray(self, rgba: Union[str, None] = None, i: int = None, j: int = None):
+        r = rgba is None or 'r' in rgba
+        g = rgba is None or 'g' in rgba
+        b = rgba is None or 'b' in rgba
+        a = rgba is None or 'a' in rgba
+
+        if i is None:
+            i = self.resolution[0] // 2
+        if j is None:
+            j = self.resolution[1] // 2
+        np_tape = self.render_tape.to_numpy()[i, j, :, :]
+        print(np_tape.ndim)
+        print(np_tape.shape)
+        fig, ax = plt.subplots()
+        if r:
+            ax.plot(np_tape[:, 0], 'r-')
+        if g:
+            ax.plot(np_tape[:, 1], 'g-')
+        if r:
+            ax.plot(np_tape[:, 2], 'b-')
+        if g:
+            ax.plot(np_tape[:, 3], 'k-')
+        fig.savefig('demo.png', bbox_inches='tight')
+
+
 
 class RaycastFunction(torch.autograd.Function):
     @staticmethod
@@ -523,9 +549,8 @@ class RaycastFunction(torch.autograd.Function):
                 vr.compute_intersections(sampling_rate , jitter)
                 # vr.compute_entry_exit(sampling_rate, jitter)
                 vr.raycast(sampling_rate)
-                vr.get_final_image()
-                vr.compute_loss()
-                result[i] = vr.output_rgba.to_torch(device=volume.device)
+                vr.get_depth_image()
+                result[i] = vr.depth.to_torch(device=volume.device)
             return result
         else: # Non-batched, single item
             # No saving via ctx.save_for_backward needed for single example, as it's saved inside vr
@@ -536,11 +561,9 @@ class RaycastFunction(torch.autograd.Function):
             vr.clear_framebuffer()
             vr.compute_rays()
             vr.compute_intersections(sampling_rate , jitter)
-            # vr.compute_entry_exit(sampling_rate, jitter)
             vr.raycast(sampling_rate)
-            vr.get_final_image()
-            vr.compute_loss()
-            return vr.output_rgba.to_torch(device=volume.device)
+            vr.get_depth_image()
+            return vr.depth.to_torch(device=volume.device)
 
     @staticmethod
     @custom_bwd
@@ -565,7 +588,7 @@ class RaycastFunction(torch.autograd.Function):
                 ctx.vr.compute_rays()
                 ctx.vr.compute_intersections(ctx.sampling_rate , ctx.jitter)
                 ctx.vr.raycast(ctx.sampling_rate)
-                ctx.vr.get_final_image()
+                ctx.vr.get_depth_image()
                 # Backward
                 ctx.vr.output_rgba.grad.from_torch(grad_output[i])
                 # ctx.vr.depth.grad.from_torch(grad_output[i])

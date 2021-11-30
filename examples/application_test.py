@@ -50,21 +50,24 @@ if __name__ == '__main__':
     ''' Tape syntax'''
     with ti.Tape(vr.loss):
         vr.raycast(sr)
-        vr.get_final_image()
+        vr.get_depth_image()
         vr.compute_loss()
 
     print(f"Calculated loss is: {vr.loss}")
 
     dtape_np = raycaster.vr.depth_tape.to_numpy()
     print(f"depthtape:  Shape: {dtape_np.shape}, Max: {dtape_np.max()}, Min: {dtape_np.min()}, Mean: {dtape_np.mean()}, Sum: {dtape_np.sum()}")
+    depth_np = vr.depth.to_numpy()
+    print(f"depth:  Shape: {depth_np.shape}, Max: {depth_np.max()}, Min: {depth_np.min()}, Mean: {depth_np.mean()}, Sum: {depth_np.sum()}")
 
-    # image_tensor = torch.rot90(vr.output_rgba.to_torch(device=vol.device), 1, [0, 1])
-    print(vr.output_rgba.shape)
-    image_tensor = vr.output_rgba.to_torch(device=vol.device)
-    save_image(image_tensor, 'tape_test_image.png')
+    dg_np = raycaster.vr.depth.grad.to_numpy()
+    print(f"depth_grad_field:  Shape: {dg_np.shape}, Max: {dg_np.max()}, Min: {dg_np.min()}, Mean: {dg_np.mean()}, Sum: {dg_np.sum()}")
+    dtape_grad_np = raycaster.vr.depth_tape.grad.to_numpy()
+    print(f"depthtape_grad:  Shape: {dtape_grad_np.shape}, Max: {dtape_grad_np.max()}, Min: {dtape_grad_np.min()}, Mean: {dtape_grad_np.mean()}, Sum: {dtape_grad_np.sum()}")
 
 
-
+    tf_grad_np = raycaster.vr.tf_tex.grad.to_numpy()
+    print(f"tf_grad:  Shape: {tf_grad_np.shape}, Max: {tf_grad_np.max()}, Min: {tf_grad_np.min()}, Mean: {tf_grad_np.mean()}, Sum: {tf_grad_np.sum()}")
     """
     depth_np = raycaster.vr.depth.to_numpy()
     dg_np = raycaster.vr.depth.grad.to_numpy()
