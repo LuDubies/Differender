@@ -501,15 +501,19 @@ class VolumeRaycaster():
         np_tape = self.render_tape.to_numpy()[i, j, :, :]
         print(np_tape.ndim)
         print(np_tape.shape)
-        fig, ax = plt.subplots()
+        fig, (ax, dx) = plt.subplots(2, 1)
         if r:
             ax.plot(np_tape[:, 0], 'r-')
+            dx.plot(np.clip(np.gradient(np_tape[:, 0]), 0, None), 'r-')
         if g:
             ax.plot(np_tape[:, 1], 'g-')
+            dx.plot(np.clip(np.gradient(np_tape[:, 1]), 0, None), 'g-')
         if r:
             ax.plot(np_tape[:, 2], 'b-')
+            dx.plot(np.clip(np.gradient(np_tape[:, 2]), 0, None), 'b-')
         if g:
             ax.plot(np_tape[:, 3], 'k-')
+            dx.plot(np.clip(np.gradient(np_tape[:, 3]), 0, None), 'k-')
         fig.savefig('demo.png', bbox_inches='tight')
 
 
