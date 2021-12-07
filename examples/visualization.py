@@ -49,4 +49,6 @@ if __name__ == '__main__':
     vr.raycast(sr)
     vr.get_depth_image()
 
-    vr.visualize_ray()
+    for i in range(10, vr.resolution[0], 20):
+        for j in range(10, vr.resolution[1], 20):
+            vr.visualize_ray(i=i, j=j, filename=f"raypics/ray_at_{i}_{j}.png")

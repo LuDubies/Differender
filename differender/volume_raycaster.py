@@ -6,7 +6,7 @@ import taichi_glsl as tl
 import matplotlib.pyplot as plt
 import numpy as np
 from enum import Enum
-from typing import Union
+from typing import Union, Tuple
 
 @ti.func
 def low_high_frac(x: float):
@@ -488,33 +488,46 @@ class VolumeRaycaster():
     def clear_loss(self):
         self.loss[None] = 0.0
 
-    def visualize_ray(self, rgba: Union[str, None] = None, i: int = None, j: int = None):
+    def visualize_ray(self, rgba: Union[str, None] = None, i: int = None, j: int = None, filename: str = None):
         r = rgba is None or 'r' in rgba
         g = rgba is None or 'g' in rgba
         b = rgba is None or 'b' in rgba
         a = rgba is None or 'a' in rgba
+
+        def trim_to_volume(data: np.array) -> Tuple[np.array, int, int]:
+            not_zero = data != 0
+            first_idx = not_zero.argmax()
+            last_idx = not_zero.size - not_zero[::-1].argmax() -1
+
+            return data[first_idx: last_idx + 1], first_idx, last_idx
+
+        def get_deriv(data: np.array) -> np.array:
+            return np.clip(np.gradient(data), 0, None)
+
+        def plot_data(data: np.array, axes: Tuple[plt.axes, plt.axes], color_fmt: str):
+            dat, f, l = trim_to_volume(data)
+            axes[0].plot(range(f, l+1), dat, color_fmt)
+            der, f, l = trim_to_volume(get_deriv(data))
+            axes[1].plot(range(f, l+1), der, color_fmt)
 
         if i is None:
             i = self.resolution[0] // 2
         if j is None:
             j = self.resolution[1] // 2
         np_tape = self.render_tape.to_numpy()[i, j, :, :]
-        print(np_tape.ndim)
-        print(np_tape.shape)
         fig, (ax, dx) = plt.subplots(2, 1)
         if r:
-            ax.plot(np_tape[:, 0], 'r-')
-            dx.plot(np.clip(np.gradient(np_tape[:, 0]), 0, None), 'r-')
+            plot_data(np_tape[:, 0], (ax, dx), 'r-')
         if g:
-            ax.plot(np_tape[:, 1], 'g-')
-            dx.plot(np.clip(np.gradient(np_tape[:, 1]), 0, None), 'g-')
+            plot_data(np_tape[:, 1], (ax, dx), 'g-')
         if r:
-            ax.plot(np_tape[:, 2], 'b-')
-            dx.plot(np.clip(np.gradient(np_tape[:, 2]), 0, None), 'b-')
+            plot_data(np_tape[:, 2], (ax, dx), 'b-')
         if g:
-            ax.plot(np_tape[:, 3], 'k-')
-            dx.plot(np.clip(np.gradient(np_tape[:, 3]), 0, None), 'k-')
-        fig.savefig('demo.png', bbox_inches='tight')
+            plot_data(np_tape[:, 3], (ax, dx), 'k-')
+        if filename is None:
+            fig.savefig('demo.png', bbox_inches='tight')
+        else:
+            fig.savefig(filename, bbox_inches='tight')
 
 
 
