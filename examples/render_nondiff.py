@@ -14,18 +14,23 @@ from torchvision.utils import save_image
 
 
 if __name__ == '__main__':
-    vol_ds = TorchDataset('C:/Users/Luca/Uni/Differender/vtk_dat/')
-    vol = vol_ds[0]['vol'].float()
+    vol_ds = TorchDataset('C:/Users/luca/Repos/Differender/vtk_dat/')
+    vol = vol_ds[1]['vol'].float()
     tf = get_tf('tf1', 128)
+    sr = 16.0
+    pixel_w = 128
+    pixel_h = pixel_w
 
     for comp in Compositing:
-        raycaster = Raycaster(vol.shape[-3:], (800, 800), 128, jitter=False, max_samples=1, compositing=comp)
+        raycaster = Raycaster(vol.shape[-3:], (pixel_w, pixel_h), 128, jitter=False, sampling_rate=sr, max_samples=2048,
+                                ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True},
+                                compositing=comp)
 
         vol = vol.to('cuda').requires_grad_(True)
         tf = tf.to('cuda').requires_grad_(True)
         lf = in_circles(1.7 * math.pi).float().to('cuda')
 
         print(vol.shape, raycaster.volume_shape, tf.shape, lf)
-        im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=16.0)
+        im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr)
 
         save_image(im, comp.name + '_render.png')

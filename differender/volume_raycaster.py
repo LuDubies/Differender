@@ -928,7 +928,7 @@ class DepthRaycaster(VolumeRaycaster):
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
-     fov=30.0, near=0.1, far=100.0, ti_kwargs={}, background_color=0.0):
+     fov=30.0, near=0.1, far=100.0, ti_kwargs={}, background_color=0.0, compositing=None):
         super().__init__()
         self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
         self.output_shape = output_shape
@@ -937,8 +937,8 @@ class Raycaster(torch.nn.Module):
         self.jitter = jitter
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
 
-        self.vr = VolumeRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
-         fov=fov, nearfar=(near, far), background_color=background_color)
+        self.vr = DepthRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
+         fov=fov, nearfar=(near, far), background_color=background_color, mode=compositing)
 
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
