@@ -51,4 +51,4 @@ if __name__ == '__main__':
 
     for i in range(10, vr.resolution[0], 20):
         for j in range(10, vr.resolution[1], 20):
-            vr.visualize_ray(i=i, j=j, filename=f"raypics/ray_at_{i}_{j}.png")
+            vr.visualize_ray(i=i, j=j, filename=f"raypics/ray_at_{i}_{j}_ronly.png", rgba='ra')

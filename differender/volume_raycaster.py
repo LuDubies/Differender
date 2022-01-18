@@ -1,4 +1,5 @@
 from numpy.core.fromnumeric import shape
+from taichi_glsl.sampling import D
 import torch
 from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 import taichi as ti
@@ -69,7 +70,7 @@ class VolumeRaycaster():
                  tf_resolution=128,
                  fov=30.0,
                  nearfar=(0.1, 100.0),
-                 background_color=0.0):
+                 background_color=0.0,):
         ''' Initializes Volume Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization
 
         Args:
@@ -106,6 +107,8 @@ class VolumeRaycaster():
         self.light_color = tl.vec3(1.0)
         self.cam_pos = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
         self.cam_pos_field = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
+        
+        self.ground_truth_depth = ti.field(shape=self.resolution, dtype=ti.f32)    
 
         # add depth tape and depth_out
         self.depth = ti.field(ti.f32, needs_grad=True)
@@ -136,6 +139,9 @@ class VolumeRaycaster():
 
     def set_cam_pos(self, cam_pos):
         self.cam_pos.from_torch(cam_pos.float())
+
+    def set_gtd(self, gtd):
+        self.ground_truth_depth.from_numpy(gtd)
 
     @ti.func # TODO: remove
     def get_ray_direction(self, orig, view_dir, x: float, y: float):
@@ -481,8 +487,33 @@ class VolumeRaycaster():
 
     @ti.kernel
     def compute_loss(self):
+        ''' exclude loss for rays missing the volume '''
+        for i, j in self.valid_sample_step_count:
+            if self.output_rgba[i, j].w < 1E-8:
+                self.ground_truth_depth[i, j] = 1
+
         for i,j in self.valid_sample_step_count:
-            self.loss[None] += ((self.depth[i,j] - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
+            # calculate the sample where we expect to have max opacity based on gt_depth
+            # could use better calculation to go from depth -> sample but like this we cant miss the calculated ra part
+            if self.ground_truth_depth[i, j] < 1:
+                expected_sample = ti.cast(self.ground_truth_depth[i, j] * self.sample_step_nums[i, j], ti.i32)      # ceil resulting in autodiff error, typecasting does not??
+                actual_opacity = self.render_tape[i, j, expected_sample].w
+                self.loss[None] += (1 - actual_opacity)**2 / (self.resolution[0] * self.resolution[1])
+
+    @ti.kernel
+    def loss_grad(self):
+        ''' manually calculate loss from distance to ground truth depth'''
+        for i,j in self.valid_sample_step_count:
+            if self.ground_truth_depth[i, j] < 1:
+                expected_sample = ti.cast(self.ground_truth_depth[i, j] * self.sample_step_nums[i, j], ti.i32)      # ceil resulting in autodiff error, typecasting does not??
+                actual_opacity = self.render_tape[i, j, expected_sample].w
+                opacity_grad_at_ijs = -2 * (1 - actual_opacity) / (self.resolution[0] * self.resolution[1])
+                self.render_tape.grad[i, j, expected_sample] += tl.vec4(0.0, 0.0, 0.0, opacity_grad_at_ijs)
+
+    @ti.kernel
+    def apply_tf_grad(self):
+        for i in range(self.tf_tex.shape[0]):
+            self.tf_tex[i] -= self.tf_tex.grad[i]
 
     @ti.kernel
     def clear_loss(self):
@@ -494,21 +525,24 @@ class VolumeRaycaster():
         b = rgba is None or 'b' in rgba
         a = rgba is None or 'a' in rgba
 
-        def trim_to_volume(data: np.array) -> Tuple[np.array, int, int]:
-            not_zero = data != 0
+        def trim_to_volume(data: np.array) -> Tuple[int, int]:
+            not_zero = data > 0.0001
             first_idx = not_zero.argmax()
             last_idx = not_zero.size - not_zero[::-1].argmax() -1
 
-            return data[first_idx: last_idx + 1], first_idx, last_idx
+            return first_idx, last_idx
 
         def get_deriv(data: np.array) -> np.array:
             return np.clip(np.gradient(data), 0, None)
 
         def plot_data(data: np.array, axes: Tuple[plt.axes, plt.axes], color_fmt: str):
-            dat, f, l = trim_to_volume(data)
-            axes[0].plot(range(f, l+1), dat, color_fmt)
-            der, f, l = trim_to_volume(get_deriv(data))
-            axes[1].plot(range(f, l+1), der, color_fmt)
+            deriv = get_deriv(data)
+            f, l = trim_to_volume(data)
+            fd, ld = trim_to_volume(deriv)
+            f = min(f, fd)
+            l = max(l, ld)
+            axes[0].plot(range(f, l+1), data[f:l+1], color_fmt)
+            axes[1].plot(range(f, l+1), deriv[f:l+1], color_fmt)
 
         if i is None:
             i = self.resolution[0] // 2
@@ -520,15 +554,26 @@ class VolumeRaycaster():
             plot_data(np_tape[:, 0], (ax, dx), 'r-')
         if g:
             plot_data(np_tape[:, 1], (ax, dx), 'g-')
-        if r:
+        if b:
             plot_data(np_tape[:, 2], (ax, dx), 'b-')
-        if g:
+        if a:
             plot_data(np_tape[:, 3], (ax, dx), 'k-')
         if filename is None:
             fig.savefig('demo.png', bbox_inches='tight')
         else:
             fig.savefig(filename, bbox_inches='tight')
 
+    def visualize_tf(self, filename=None):
+        fig, ax = plt.subplots()
+        tf_np = self.tf_tex.to_numpy()
+        ax.plot(tf_np[:, 0], 'r-')
+        ax.plot(tf_np[:, 1], 'g-')
+        ax.plot(tf_np[:, 2], 'b-')
+        ax.plot(tf_np[:, 3], 'k-')
+        if filename is None:
+            fig.savefig('tf.png', bbox_inches='tight')
+        else:
+            fig.savefig(filename, bbox_inches='tight')
 
 
 class RaycastFunction(torch.autograd.Function):
@@ -605,7 +650,7 @@ class RaycastFunction(torch.autograd.Function):
                 ctx.vr.compute_rays()
                 ctx.vr.compute_intersections(ctx.sampling_rate , ctx.jitter)
                 ctx.vr.raycast(ctx.sampling_rate)
-                ctx.vr.get_depth_image()
+                ctx.vr.get_final_image()
                 # Backward
                 ctx.vr.output_rgba.grad.from_torch(grad_output[i])
                 # ctx.vr.depth.grad.from_torch(grad_output[i])
