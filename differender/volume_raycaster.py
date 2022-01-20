@@ -665,12 +665,11 @@ class RaycastFunction(torch.autograd.Function):
     
     
 class Mode(IntEnum):
-    Standard = 0
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
-    Similarity = 4
-    WYSIWYP = 5
+    #WYSIWYP = 4
+
 
 @ti.data_oriented
 class DepthRaycaster(VolumeRaycaster):
@@ -704,9 +703,11 @@ class DepthRaycaster(VolumeRaycaster):
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
                 last_opacity = 0.0
+                maximum = 0.0
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
                     opacity = 0.0
+                    old_agg_opacity = 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
                         tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
@@ -721,8 +722,7 @@ class DepthRaycaster(VolumeRaycaster):
                         light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                         intensity = self.sample_volume_trilinear(pos)
                         sample_color = self.apply_transfer_function(intensity)
-                        opacity = 1.0 - ti.pow(1.0 - sample_color.w,
-                                            1.0 / sampling_rate)
+                        opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
                         if sample_color.w > 1e-3:
                             normal = self.get_volume_normal(pos)
                             light_dir = (pos - light_pos).normalized()  # Direction to light source
@@ -732,38 +732,31 @@ class DepthRaycaster(VolumeRaycaster):
                             r_dot_v = max(r.dot(-vd), 0.0)
                             specular = self.specular * pow(r_dot_v, self.shininess)
 
-                            current = self.render_tape[i,j,0]
-
                             # fill render tape according to selected mode
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                            if ti.static(self.mode == Mode.FirstHitDepth):
-                                self.depth[i,j] = depth  if sample_color.w > 1e-3 and current.w == 0.0 else current         
-                            elif ti.static(self.mode == Mode.MaxOpacity):
-                                self.depth[i,j] = depth if sample_color.w > current.w else current
-                            elif ti.static(self.mode == Mode.MaxGradient):
-                                grad = sample_color.w - last_opacity
-                                self.depth[i,j] = depth if grad > current.w else current
-                            else:
-                                self.depth[i,j] = depth
+                            old_agg_opacity = self.render_tape[i, j, 0].w
+                            new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                            if ti.static(mode == Mode.FirstHitDepth):
+                                if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                                    self.depth[i, j] = depth
+                            elif ti.static(mode == Mode.MaxOpacity):
+                                if sample_color.w > maximum:
+                                    self.depth[i, j] = depth
+                                    maximum = sample_color.w
+                            elif ti.static(mode == Mode.MaxGradient):
+                                grad = new_agg_sample.w - old_agg_opacity
+                                if grad > maximum:
+                                    self.depth[i, j] = depth
+                                    maximum = grad
+                            self.render_tape[i, j, 0] = new_agg_sample
 
-                            # for Standard mode, add current sample to render tape according to prev opacity
-                            if mode == Mode.Standard:
-                                self.render_tape[i,j,0] = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                            else: # for Depth Rendering just set the current color result
-                                self.render_tape[i,j,0] = render_output
-
-                            # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
-                            if ti.static(self.mode == Mode.MaxGradient or self.mode == Mode.MaxOpacity):
-                                if cnt == n_samples - 1:
-                                    self.render_tape[i, j, 0].w = 1
-
-                        # save opacity to be able to calc a gradient
-                        last_opacity = sample_color.w
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
-     fov=30.0, near=0.1, far=100.0, ti_kwargs={}, background_color=0.0, mode=None):
+                 fov=30.0, near=0.1, far=100.0, ti_kwargs=None, background_color=0.0, mode=None):
         super().__init__()
+        if ti_kwargs is None:
+            ti_kwargs = {}
         self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
         self.output_shape = output_shape
         self.tf_shape = tf_shape
@@ -780,7 +773,7 @@ class Raycaster(torch.nn.Module):
             if self.mode is not None:
                 mode = self.mode
             else:
-                mode = Mode.Standard
+                mode = Mode.FirstHitDepth
 
         with torch.no_grad() as _, autocast(False) as _:
             batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
