@@ -665,7 +665,6 @@ class RaycastFunction(torch.autograd.Function):
     
     
 class Mode(IntEnum):
-    Standard = 0
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
@@ -703,10 +702,9 @@ class DepthRaycaster(VolumeRaycaster):
                 mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
-                last_opacity = 0.0
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
-                    opacity = 0.0
+                    opacity, old_agg_opacity = 0.0, 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
                         tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
@@ -732,33 +730,25 @@ class DepthRaycaster(VolumeRaycaster):
                             r_dot_v = max(r.dot(-vd), 0.0)
                             specular = self.specular * pow(r_dot_v, self.shininess)
 
-                            current = self.render_tape[i,j,0]
-
                             # fill render tape according to selected mode
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                            if ti.static(self.mode == Mode.FirstHitDepth):
-                                self.depth[i,j] = depth  if sample_color.w > 1e-3 and current.w == 0.0 else current         
-                            elif ti.static(self.mode == Mode.MaxOpacity):
-                                self.depth[i,j] = depth if sample_color.w > current.w else current
-                            elif ti.static(self.mode == Mode.MaxGradient):
-                                grad = sample_color.w - last_opacity
-                                self.depth[i,j] = depth if grad > current.w else current
+                            old_agg_opacity = self.render_tape[i,j,0].w
+                            new_agg_sample  = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                            if ti.static(mode == Mode.FirstHitDepth):
+                                if old_agg_opacity < 1e-3:
+                                    self.depth[i,j] = depth 
+                            elif ti.static(mode == Mode.MaxOpacity):
+                                if sample_color.w > self.render_tape[i,j,0].w:
+                                    self.depth[i,j] = depth
+                            elif ti.static(mode == Mode.MaxGradient):
+                                grad = new_agg_sample.w - old_agg_opacity
+                                if grad > self.render_tape[i,j,0].w:
+                                    self.depth[i,j] = depth
                             else:
                                 self.depth[i,j] = depth
 
-                            # for Standard mode, add current sample to render tape according to prev opacity
-                            if mode == Mode.Standard:
-                                self.render_tape[i,j,0] = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                            else: # for Depth Rendering just set the current color result
-                                self.render_tape[i,j,0] = render_output
+                            self.render_tape[i,j,0] = new_agg_sample
 
-                            # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
-                            if ti.static(self.mode == Mode.MaxGradient or self.mode == Mode.MaxOpacity):
-                                if cnt == n_samples - 1:
-                                    self.render_tape[i, j, 0].w = 1
-
-                        # save opacity to be able to calc a gradient
-                        last_opacity = sample_color.w
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
@@ -780,7 +770,7 @@ class Raycaster(torch.nn.Module):
             if self.mode is not None:
                 mode = self.mode
             else:
-                mode = Mode.Standard
+                mode = Mode.FirstHitDepth
 
         with torch.no_grad() as _, autocast(False) as _:
             batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
