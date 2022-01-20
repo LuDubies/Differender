@@ -29,10 +29,8 @@ if __name__ == '__main__':
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
     for mode in Mode:
-        raycaster.vr.set_mode(mode)
-        print(raycaster.vr.get_mode())
 
         print(f"Rendering {mode.name} Image...")
-        im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr)
+        im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr, mode=mode)
 
         save_image(im, mode.name + '_render.png')
