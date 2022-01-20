@@ -742,18 +742,16 @@ class DepthRaycaster(VolumeRaycaster):
                             current = self.render_tape[i,j,0]
 
                             # fill render tape according to selected mode
-                            render_output = tl.vec4(0.0)
-                            if self.mode == Mode.Standard:
-                                render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                            elif self.mode == Mode.FirstHitDepth:
-                                render_output = tl.vec4(depth, depth, depth, 1) if sample_color.w > 1e-3 and current == tl.vec4(0) else current         
-                            elif self.mode == Mode.MaxOpacity:
-                                render_output = tl.vec4(depth, depth, depth, sample_color.w) if sample_color.w > current.w else current
-                            elif self.mode == Mode.MaxGradient:
+                            render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                            if ti.static(self.mode == Mode.FirstHitDepth):
+                                self.depth[i,j] = depth  if sample_color.w > 1e-3 and current.w == 0.0 else current         
+                            elif ti.static(self.mode == Mode.MaxOpacity):
+                                self.depth[i,j] = depth if sample_color.w > current.w else current
+                            elif ti.static(self.mode == Mode.MaxGradient):
                                 grad = sample_color.w - last_opacity
-                                render_output = tl.vec4(depth, depth, depth, grad) if grad > current.w else current
+                                self.depth[i,j] = depth if grad > current.w else current
                             else:
-                                render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                                self.depth[i,j] = depth
 
                             # for Standard mode, add current sample to render tape according to prev opacity
                             if self.mode == Mode.Standard:
@@ -762,7 +760,7 @@ class DepthRaycaster(VolumeRaycaster):
                                 self.render_tape[i,j,0] = render_output
 
                             # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
-                            if self.mode == Mode.MaxGradient or self.mode == Mode.MaxOpacity:
+                            if ti.static(self.mode == Mode.MaxGradient or self.mode == Mode.MaxOpacity):
                                 if cnt == n_samples - 1:
                                     self.render_tape[i, j, 0].w = 1
 
@@ -791,7 +789,7 @@ class Raycaster(torch.nn.Module):
             if batched:  # Batched Input
                 result = torch.zeros(bs,
                                     *self.vr.resolution,
-                                    4,
+                                    5,
                                     dtype=torch.float32,
                                     device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
@@ -806,7 +804,8 @@ class Raycaster(torch.nn.Module):
                     self.vr.compute_intersections_nondiff(sr, False)
                     self.vr.raycast_nondiff(sr)
                     self.vr.get_final_image_nondiff()
-                    result[i] = self.vr.output_rgba.to_torch(device=volume.device)
+                    result[i,...,:4] = self.vr.output_rgba.to_torch(device=volume.device)
+                    result[i,...,4]  = self.vr.depth.to_torch(device=volume.device)
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
                 return torch.flip(result, (2,)).permute(0, 3, 2, 1).contiguous()
             else:
@@ -819,7 +818,8 @@ class Raycaster(torch.nn.Module):
                 self.vr.raycast_nondiff(sr)
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
-                return torch.flip(self.vr.output_rgba.to_torch(device=volume.device), (1, )).permute(2, 1, 0).contiguous()
+                rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device), self.vr.depth.to_torch(device=volume.device)], dim=-1)
+                return torch.flip(rgbad, (1, )).permute(2, 1, 0).contiguous()
 
     def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
         ''' seeks to mimic raycast_nondiff, but using the raycast method of the Volume raycaster
