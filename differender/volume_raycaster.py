@@ -668,7 +668,7 @@ class Mode(IntEnum):
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
-    # WYSIWYP = 4
+    # YSIWYP = 4
 
 
 @ti.data_oriented
@@ -734,19 +734,20 @@ class DepthRaycaster(VolumeRaycaster):
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                             old_agg_opacity = self.render_tape[i, j, 0].w
                             new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                            if ti.static(mode == Mode.FirstHitDepth):
+                            if mode == Mode.FirstHitDepth:
                                 if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
                                     self.depth[i, j] = depth
-                            elif ti.static(mode == Mode.MaxOpacity):
+                            elif mode == Mode.MaxOpacity:
                                 if sample_color.w > maximum:
                                     self.depth[i, j] = depth
                                     maximum = sample_color.w
-                            elif ti.static(mode == Mode.MaxGradient):
+                            elif mode == Mode.MaxGradient:
                                 grad = new_agg_sample.w - old_agg_opacity
                                 if grad > maximum:
                                     self.depth[i, j] = depth
                                     maximum = grad
                             self.render_tape[i, j, 0] = new_agg_sample
+
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
