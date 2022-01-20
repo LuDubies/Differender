@@ -668,7 +668,7 @@ class Mode(IntEnum):
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
-    #WYSIWYP = 4
+    # WYSIWYP = 4
 
 
 @ti.data_oriented
@@ -702,12 +702,10 @@ class DepthRaycaster(VolumeRaycaster):
                 mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
-                last_opacity = 0.0
                 maximum = 0.0
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
-                    opacity = 0.0
-                    old_agg_opacity = 0.0
+                    opacity, old_agg_opacity = 0.0, 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
                         tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
@@ -749,7 +747,6 @@ class DepthRaycaster(VolumeRaycaster):
                                     self.depth[i, j] = depth
                                     maximum = grad
                             self.render_tape[i, j, 0] = new_agg_sample
-
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
