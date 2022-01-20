@@ -6,7 +6,7 @@ import taichi as ti
 import taichi_glsl as tl
 import matplotlib.pyplot as plt
 import numpy as np
-from enum import Enum
+from enum import IntEnum
 from typing import Union, Tuple
 
 @ti.func
@@ -664,7 +664,7 @@ class RaycastFunction(torch.autograd.Function):
                     None, None, None
     
     
-class Mode(Enum):
+class Mode(IntEnum):
     Standard = 0
     FirstHitDepth = 1
     MaxOpacity = 2
@@ -703,11 +703,12 @@ class DepthRaycaster(VolumeRaycaster):
             return self.mode
 
         @ti.kernel
-        def raycast_nondiff(self, sampling_rate: float):
+        def raycast_nondiff(self, sampling_rate: float, mode: int):
             ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
 
             Args:
                 sampling_rate (float): Sampling rate (multiplier with Nyquist frequence)
+                mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
                 last_opacity = 0.0
@@ -743,26 +744,26 @@ class DepthRaycaster(VolumeRaycaster):
 
                             # fill render tape according to selected mode
                             render_output = tl.vec4(0.0)
-                            if self.mode == Mode.Standard:
+                            if mode == Mode.Standard:
                                 render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                            elif self.mode == Mode.FirstHitDepth:
+                            elif mode == Mode.FirstHitDepth:
                                 render_output = tl.vec4(depth, depth, depth, 1) if sample_color.w > 1e-3 and current == tl.vec4(0) else current         
-                            elif self.mode == Mode.MaxOpacity:
+                            elif mode == Mode.MaxOpacity:
                                 render_output = tl.vec4(depth, depth, depth, sample_color.w) if sample_color.w > current.w else current
-                            elif self.mode == Mode.MaxGradient:
+                            elif mode == Mode.MaxGradient:
                                 grad = sample_color.w - last_opacity
                                 render_output = tl.vec4(depth, depth, depth, grad) if grad > current.w else current
                             else:
                                 render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
 
                             # for Standard mode, add current sample to render tape according to prev opacity
-                            if self.mode == Mode.Standard:
+                            if mode == Mode.Standard:
                                 self.render_tape[i,j,0] = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
                             else: # for Depth Rendering just set the current color result
                                 self.render_tape[i,j,0] = render_output
 
                             # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
-                            if self.mode == Mode.MaxGradient or self.mode == Mode.MaxOpacity:
+                            if mode == Mode.MaxGradient or mode == Mode.MaxOpacity:
                                 if cnt == n_samples - 1:
                                     self.render_tape[i, j, 0].w = 1
 
@@ -783,8 +784,7 @@ class Raycaster(torch.nn.Module):
         self.vr = DepthRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
          fov=fov, nearfar=(near, far), background_color=background_color, mode=mode)
 
-
-    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
+    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None, mode: Mode = Mode.Standard):
         with torch.no_grad() as _, autocast(False) as _:
             batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
             sr = sampling_rate if sampling_rate is not None else 4.0 * self.sampling_rate
@@ -804,7 +804,7 @@ class Raycaster(torch.nn.Module):
                     self.vr.clear_framebuffer()
                     self.vr.compute_rays()
                     self.vr.compute_intersections_nondiff(sr, False)
-                    self.vr.raycast_nondiff(sr)
+                    self.vr.raycast_nondiff(sr, mode)
                     self.vr.get_final_image_nondiff()
                     result[i] = self.vr.output_rgba.to_torch(device=volume.device)
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
@@ -816,7 +816,7 @@ class Raycaster(torch.nn.Module):
                 self.vr.clear_framebuffer()
                 self.vr.compute_rays()
                 self.vr.compute_intersections_nondiff(sr, False)
-                self.vr.raycast_nondiff(sr)
+                self.vr.raycast_nondiff(sr, mode)
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
                 return torch.flip(self.vr.output_rgba.to_torch(device=volume.device), (1, )).permute(2, 1, 0).contiguous()
