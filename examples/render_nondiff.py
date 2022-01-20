@@ -24,19 +24,21 @@ if __name__ == '__main__':
     tf = tf.to('cuda').requires_grad_(True)
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
-    fig, axs = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axs = plt.subplots(2, 3, figsize=(20, 10))
 
     for i, mode in enumerate(Mode):
 
         print(f"Rendering {mode.name} Image...")
         im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr, mode=mode)
 
-        axs[i+1].imshow(im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy())
-        axs[i+1].set_title(f"{mode.name}")
+        axs[(i+1)//3][(i+1) % 3].imshow(im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy())
+        axs[(i+1)//3][(i+1) % 3].set_title(f"{mode.name}")
 
         if i == 0:
-            axs[0].imshow(im.squeeze()[:3].permute(1, 2, 0).cpu().numpy())
-            axs[0].set_title(f"Standard")
+            axs[0][0].imshow(im.squeeze()[:3].permute(1, 2, 0).cpu().numpy())
+            axs[0][0].set_title(f"Standard")
+            axs[1][2].imshow(im.squeeze()[:3].permute(1, 2, 0).cpu().numpy())
+            axs[1][2].set_title(f"Standard")
 
     fig.show()
 

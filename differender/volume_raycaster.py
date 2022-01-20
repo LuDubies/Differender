@@ -668,7 +668,7 @@ class Mode(IntEnum):
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
-    # YSIWYP = 4
+    WYSIWYP = 4
 
 
 @ti.data_oriented
@@ -688,10 +688,19 @@ class DepthRaycaster(VolumeRaycaster):
             super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
 
             render_tiles = tuple(map(lambda x: x // 8, render_resolution))
-            self.depth = ti.field(ti.f32, needs_grad=True)
-            self.depth_tape = ti.field(ti.f32, needs_grad=True)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth, self.depth.grad)
-            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape, self.depth_tape.grad)
+            self.depth = ti.field(ti.f32)
+            self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
+            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
+            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
+
+        @ti.func
+        def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
+            tmax = self.exit[i, j]
+            n_samples = self.sample_step_nums[i, j]
+            ray_len = (tmax - self.entry[i, j])
+            tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+            dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+            return dist / self.far
 
         @ti.kernel
         def raycast_nondiff(self, sampling_rate: float, mode: int):
@@ -703,6 +712,16 @@ class DepthRaycaster(VolumeRaycaster):
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
                 maximum = 0.0
+
+                # WYSIWYP fields
+                biggest_jump = 0.0
+                interval_start = 0
+                interval_start_acc_opac = 0.0
+                current_d = 0.0
+                last_d = 0.0
+                current_dd = 0.0
+                last_dd = 0.0
+
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
                     opacity, old_agg_opacity = 0.0, 0.0
@@ -746,6 +765,27 @@ class DepthRaycaster(VolumeRaycaster):
                                 if grad > maximum:
                                     self.depth[i, j] = depth
                                     maximum = grad
+                            elif mode == Mode.WYSIWYP and cnt > 0:
+                                # calculate current derivative and dd (and think about better notation)
+                                current_d = new_agg_sample.w - old_agg_opacity
+                                current_dd = current_d - last_d
+
+                                # check for interval end (dd up from negative or ray end or ray finished)
+                                if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
+                                        new_agg_sample.w >= 0.99:
+                                    if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                        biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                        # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                        self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+
+                                # check for interval start (dd from 0 or neg to positive)
+                                if last_dd <= 0.0 < current_dd:
+                                    interval_start = cnt
+
+                                # save current values in last_fields
+                                last_d = current_d
+                                last_dd = current_dd
+
                             self.render_tape[i, j, 0] = new_agg_sample
 
 
