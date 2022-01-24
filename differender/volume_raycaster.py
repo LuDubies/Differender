@@ -1,11 +1,13 @@
 from numpy.core.fromnumeric import shape
 from taichi_glsl.sampling import D
 import torch
+import torch.nn.functional as F
 from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 import taichi as ti
 import taichi_glsl as tl
 import matplotlib.pyplot as plt
 import numpy as np
+from itertools import chain
 from enum import IntEnum
 from typing import Union, Tuple
 
@@ -688,7 +690,7 @@ class DepthRaycaster(VolumeRaycaster):
             super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
 
             render_tiles = tuple(map(lambda x: x // 8, render_resolution))
-            self.depth = ti.field(ti.f32)
+            self.depth = ti.Vector.field(4, dtype=ti.f32)
             self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
             ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
             ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
@@ -711,7 +713,8 @@ class DepthRaycaster(VolumeRaycaster):
                 mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
-                maximum = 0.0
+                maximum, max_grad = 0.0, 0.0
+                d_fh, d_mo, d_mg, d_ww = 0.0, 0.0, 0.0, 0.0
 
                 # WYSIWYP fields
                 biggest_jump = 0.0
@@ -753,39 +756,38 @@ class DepthRaycaster(VolumeRaycaster):
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                             old_agg_opacity = self.render_tape[i, j, 0].w
                             new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                            if mode == Mode.FirstHitDepth:
-                                if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
-                                    self.depth[i, j] = depth
-                            elif mode == Mode.MaxOpacity:
-                                if sample_color.w > maximum:
-                                    self.depth[i, j] = depth
-                                    maximum = sample_color.w
-                            elif mode == Mode.MaxGradient:
-                                grad = new_agg_sample.w - old_agg_opacity
-                                if grad > maximum:
-                                    self.depth[i, j] = depth
-                                    maximum = grad
-                            elif mode == Mode.WYSIWYP and cnt > 0:
-                                # calculate current derivative and dd (and think about better notation)
-                                current_d = new_agg_sample.w - old_agg_opacity
-                                current_dd = current_d - last_d
+                            
+                            if sample_color.w > 1e-3 and d_fh == 0.0:
+                                d_fh = depth
+                            if sample_color.w > maximum:
+                                d_mo = depth
+                                maximum = sample_color.w
+                            grad = new_agg_sample.w - old_agg_opacity
+                            if grad > max_grad:
+                                d_mg = depth
+                                max_grad = grad
+                            # WYSIWYP
+                            # calculate current derivative and dd (and think about better notation)
+                            current_d = new_agg_sample.w - old_agg_opacity
+                            current_dd = current_d - last_d
 
-                                # check for interval end (dd up from negative or ray end or ray finished)
-                                if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
-                                        new_agg_sample.w >= 0.99:
-                                    if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                                        biggest_jump = new_agg_sample.w - interval_start_acc_opac
-                                        # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                        self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+                            # check for interval end (dd up from negative or ray end or ray finished)
+                            if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
+                                    new_agg_sample.w >= 0.99:
+                                if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                    biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                    # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                    d_ww = self.get_depth_from_sx(interval_start, i, j)
 
-                                # check for interval start (dd from 0 or neg to positive)
-                                if last_dd <= 0.0 < current_dd:
-                                    interval_start = cnt
+                            # check for interval start (dd from 0 or neg to positive)
+                            if last_dd <= 0.0 < current_dd:
+                                interval_start = cnt
 
-                                # save current values in last_fields
-                                last_d = current_d
-                                last_dd = current_dd
+                            # save current values in last_fields
+                            last_d = current_d
+                            last_dd = current_dd
 
+                            self.depth[i,j] = tl.vec4(d_fh, d_mo, d_mg, d_ww)
                             self.render_tape[i, j, 0] = new_agg_sample
 
 
@@ -795,7 +797,8 @@ class Raycaster(torch.nn.Module):
         super().__init__()
         if ti_kwargs is None:
             ti_kwargs = {}
-        self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
+        pads = tuple(map(lambda d: (4 - (d % 4)) % 4, tuple(volume_shape)))
+        self.volume_shape = (volume_shape[2] + pads[2], volume_shape[0] + pads[0], volume_shape[1] + pads[1])
         self.output_shape = output_shape
         self.tf_shape = tf_shape
         self.sampling_rate = sampling_rate
@@ -819,7 +822,7 @@ class Raycaster(torch.nn.Module):
             if batched:  # Batched Input
                 result = torch.zeros(bs,
                                     *self.vr.resolution,
-                                    5,
+                                    8,
                                     dtype=torch.float32,
                                     device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
@@ -835,7 +838,7 @@ class Raycaster(torch.nn.Module):
                     self.vr.raycast_nondiff(sr, mode)
                     self.vr.get_final_image_nondiff()
                     result[i,...,:4] = self.vr.output_rgba.to_torch(device=volume.device)
-                    result[i,...,4]  = self.vr.depth.to_torch(device=volume.device)
+                    result[i,...,4:]  = self.vr.depth.to_torch(device=volume.device)
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
                 return torch.flip(result, (2,)).permute(0, 3, 2, 1).contiguous()
             else:
@@ -882,19 +885,33 @@ class Raycaster(torch.nn.Module):
             ).permute(2, 1, 0).contiguous()
 
 
-    def _determine_batch(self, volume, tf, look_from):
+    def _compute_pad(self, shape, tileable_by=4):
+        def remainder2pad(s):
+            p = (4 - (s % 4)) % 4
+            if p < 2:
+                return (p, 0)
+            if p == 2:
+                return (1, 1)
+            else:
+                return (2, 1)
+        return tuple(reversed(tuple(chain(*map(remainder2pad, shape)))))
+    def _determine_batch(self, volume, tf, look_from, auto_pad_volume=True):
         ''' Determines whether there's a batched input and returns lists of non-batched inputs.
 
         Args:
             volume (Tensor): Volume input, either 4D or 5D (batched)
             tf (Tensor): Transfer Function input, either 2D or 3D (batched)
             look_from (Tensor): Camera Look From input, either 1D or 2D (batched)
+            auto_pad_volume (bool): Whether volume dimensions are automatically padded to be tile-able by Taichi
 
         Returns:
             ([bool], Tensor, Tensor, Tensor): (is anything batched?, batched input or list of non-batched inputs (for all inputs))
         '''
         batched = torch.tensor([volume.ndim == 5, tf.ndim == 3, look_from.ndim == 2])
-
+        if auto_pad_volume:
+            
+            pad = self._compute_pad(tuple(volume.shape[-3:]))
+            volume = F.pad(volume, pad)
         if batched.any():
             bs = [volume, tf, look_from][batched.long().argmax().item()].size(0)
             vol_out = volume.squeeze(1).permute(0,3,1,2).contiguous() if batched[0].item() else volume.squeeze(0).permute(2, 0, 1).expand(bs, -1,-1,-1).clone()
