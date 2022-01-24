@@ -713,6 +713,7 @@ class DepthRaycaster(VolumeRaycaster):
             for i, j in self.valid_sample_step_count:  # For all pixels
                 maximum = 0.0           
                 opacity, old_agg_opacity = 0.0, 0.0
+                new_agg_sample = tl.vec4(0.0)
 
                 # WYSIWYP fields
                 biggest_jump = 0.0
@@ -753,44 +754,59 @@ class DepthRaycaster(VolumeRaycaster):
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                             old_agg_opacity = self.render_tape[i, j, 0].w
                             new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                            
-                            if mode == Mode.FirstHitDepth:
-                                if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
-                                    self.depth[i, j] = depth
-                            elif mode == Mode.MaxOpacity:
-                                if sample_color.w > maximum:
-                                    self.depth[i, j] = depth
-                                    maximum = sample_color.w
-                            elif mode == Mode.MaxGradient:
-                                grad = new_agg_sample.w - old_agg_opacity
-                                if grad > maximum:
-                                    self.depth[i, j] = depth
-                                    maximum = grad
-                            elif mode == Mode.WYSIWYP and cnt > 0:
-                                # calculate current derivative and dd (and think about better notation)
-                                current_d = new_agg_sample.w - old_agg_opacity
-                                current_dd = current_d - last_d
+                        else:
+                            old_agg_opacity = self.render_tape[i, j, 0].w
+                            new_agg_sample = self.render_tape[i, j, 0]
 
-                                # check for interval end (2nd derivative cahnges from negative to zero or positive or ray end or ray finished)
-                                if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
-                                        new_agg_sample.w >= 0.99:
-                                    if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                                        biggest_jump = new_agg_sample.w - interval_start_acc_opac
-                                        # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                        self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
-                                        #self.depth[i, j] = 0.9
+                        if mode == Mode.FirstHitDepth:
+                            if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                                self.depth[i, j] = depth
+                        elif mode == Mode.MaxOpacity:
+                            if sample_color.w > maximum:
+                                self.depth[i, j] = depth
+                                maximum = sample_color.w
+                        elif mode == Mode.MaxGradient:
+                            grad = new_agg_sample.w - old_agg_opacity
+                            if grad > maximum:
+                                self.depth[i, j] = depth
+                                maximum = grad
+                        elif mode == Mode.WYSIWYP and cnt > 0:
+                            # calculate current derivative and dd (and think about better notation)
+                            current_d = new_agg_sample.w - old_agg_opacity
+                            current_dd = current_d - last_d
 
-                                # check for interval start (2nd derivative becomes positive)
-                                if last_dd <= 0.0 < current_dd:
-                                    interval_start = cnt
-                                    interval_start_acc_opac = new_agg_sample.w
+                            if 45 == j and 395 == i:
+                                self.depth_tape[cnt] = new_agg_sample.w
 
-                                # save current values in last_fields
-                                last_d = current_d
-                                last_dd = current_dd
+                            # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
+                            if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
+                                    new_agg_sample.w >= 0.99:
+                                if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                    biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                    # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                    self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
 
-                            self.render_tape[i, j, 0] = new_agg_sample
+                            # check for interval start (2nd derivative becomes positive)
+                            if last_dd <= 0.0 < current_dd:
+                                interval_start = cnt
+                                interval_start_acc_opac = new_agg_sample.w
 
+                            # save current values in last_fields
+                            last_d = current_d
+                            last_dd = current_dd
+
+                        self.render_tape[i, j, 0] = new_agg_sample
+                        
+
+
+        def visualize_ray(self, filename: str = None):
+            np_tape = self.depth_tape.to_numpy()[5000:6000]
+            fig, ax = plt.subplots()
+            ax.plot(np_tape)
+            if filename is None:
+                fig.savefig('ray(depth).png', bbox_inches='tight')
+            else:
+                fig.savefig(filename, bbox_inches='tight')
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
