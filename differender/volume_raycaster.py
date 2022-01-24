@@ -711,7 +711,8 @@ class DepthRaycaster(VolumeRaycaster):
                 mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
-                maximum = 0.0
+                maximum = 0.0           
+                opacity, old_agg_opacity = 0.0, 0.0
 
                 # WYSIWYP fields
                 biggest_jump = 0.0
@@ -724,7 +725,6 @@ class DepthRaycaster(VolumeRaycaster):
 
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
-                    opacity, old_agg_opacity = 0.0, 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
                         tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
@@ -753,6 +753,7 @@ class DepthRaycaster(VolumeRaycaster):
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                             old_agg_opacity = self.render_tape[i, j, 0].w
                             new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                            
                             if mode == Mode.FirstHitDepth:
                                 if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
                                     self.depth[i, j] = depth
@@ -770,17 +771,19 @@ class DepthRaycaster(VolumeRaycaster):
                                 current_d = new_agg_sample.w - old_agg_opacity
                                 current_dd = current_d - last_d
 
-                                # check for interval end (dd up from negative or ray end or ray finished)
+                                # check for interval end (2nd derivative cahnges from negative to zero or positive or ray end or ray finished)
                                 if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
                                         new_agg_sample.w >= 0.99:
                                     if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
                                         biggest_jump = new_agg_sample.w - interval_start_acc_opac
                                         # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
                                         self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+                                        #self.depth[i, j] = 0.9
 
-                                # check for interval start (dd from 0 or neg to positive)
+                                # check for interval start (2nd derivative becomes positive)
                                 if last_dd <= 0.0 < current_dd:
                                     interval_start = cnt
+                                    interval_start_acc_opac = new_agg_sample.w
 
                                 # save current values in last_fields
                                 last_d = current_d
