@@ -762,7 +762,7 @@ class DepthRaycaster(VolumeRaycaster):
                             if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
                                 self.depth[i, j] = depth
                         elif mode == Mode.MaxOpacity:
-                            if sample_color.w > maximum:
+                            if sample_color.w > maximum and sample_color.w > 1e-3:
                                 self.depth[i, j] = depth
                                 maximum = sample_color.w
                         elif mode == Mode.MaxGradient:
