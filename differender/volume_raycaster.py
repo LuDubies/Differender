@@ -724,6 +724,7 @@ class DepthRaycaster(VolumeRaycaster):
                 last_d = 0.0
                 current_dd = 0.0
                 last_dd = 0.0
+                new_agg_sample = tl.vec4(0.0)
 
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
@@ -756,39 +757,43 @@ class DepthRaycaster(VolumeRaycaster):
                             render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                             old_agg_opacity = self.render_tape[i, j, 0].w
                             new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                        else:
+                            old_agg_opacity = self.render_tape[i,j, 0].w
+                            new_agg_sample = self.render_tape[i,j, 0]
                             
-                            if sample_color.w > 1e-3 and d_fh == 0.0:
-                                d_fh = depth
-                            if sample_color.w > maximum:
-                                d_mo = depth
-                                maximum = sample_color.w
-                            grad = new_agg_sample.w - old_agg_opacity
-                            if grad > max_grad:
-                                d_mg = depth
-                                max_grad = grad
-                            # WYSIWYP
-                            # calculate current derivative and dd (and think about better notation)
-                            current_d = new_agg_sample.w - old_agg_opacity
-                            current_dd = current_d - last_d
+                        if sample_color.w > 1e-3 and d_fh == 0.0:
+                            d_fh = depth
+                        if sample_color.w > maximum:
+                            d_mo = depth
+                            maximum = sample_color.w
+                        grad = new_agg_sample.w - old_agg_opacity
+                        if grad > max_grad:
+                            d_mg = depth
+                            max_grad = grad
+                        # WYSIWYP
+                        # calculate current derivative and dd (and think about better notation)
+                        current_d = new_agg_sample.w - old_agg_opacity
+                        current_dd = current_d - last_d
 
-                            # check for interval end (dd up from negative or ray end or ray finished)
-                            if last_dd < 0.0 <= current_dd or cnt == self.sample_step_nums[i, j] - 1 or\
-                                    new_agg_sample.w >= 0.99:
-                                if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                                    biggest_jump = new_agg_sample.w - interval_start_acc_opac
-                                    # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                    d_ww = self.get_depth_from_sx(interval_start, i, j)
+                        # check for interval end (dd up from negative or ray end or ray finished)
+                        if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
+                                new_agg_sample.w >= 0.99:
+                            if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                d_ww = self.get_depth_from_sx(interval_start, i, j)
 
-                            # check for interval start (dd from 0 or neg to positive)
-                            if last_dd <= 0.0 < current_dd:
-                                interval_start = cnt
+                        # check for interval start (dd from 0 or neg to positive)
+                        if last_dd <= 0.0 < current_dd:
+                            interval_start = cnt
+                            interval_start_acc_opac = new_agg_sample.w
 
-                            # save current values in last_fields
-                            last_d = current_d
-                            last_dd = current_dd
+                        # save current values in last_fields
+                        last_d = current_d
+                        last_dd = current_dd
 
-                            self.depth[i,j] = tl.vec4(d_fh, d_mo, d_mg, d_ww)
-                            self.render_tape[i, j, 0] = new_agg_sample
+                        self.depth[i,j] = tl.vec4(d_fh, d_mo, d_mg, d_ww)
+                        self.render_tape[i, j, 0] = new_agg_sample
 
 
 class Raycaster(torch.nn.Module):
