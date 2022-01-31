@@ -775,9 +775,6 @@ class DepthRaycaster(VolumeRaycaster):
                             current_d = new_agg_sample.w - old_agg_opacity
                             current_dd = current_d - last_d
 
-                            if 45 == j and 395 == i:
-                                self.depth_tape[cnt] = new_agg_sample.w
-
                             # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
                             if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
                                     new_agg_sample.w >= 0.99:
