@@ -765,7 +765,7 @@ class DepthRaycaster(VolumeRaycaster):
                     if sample_color.w > 1e-3 and d_fh == 0.0:
                         d_fh = depth
                     # Max Opacity
-                    if sample_color.w > maximum:
+                    if sample_color.w > 1e-3 and sample_color.w > maximum:
                         d_mo = depth
                         maximum = sample_color.w
                     # Max Gradient
