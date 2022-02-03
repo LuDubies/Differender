@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
     GTD = 0.5
 
-    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048,
+    raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=sr, max_samples=2048,
                             ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True})
 
     vol = vol.to('cuda').requires_grad_(True)

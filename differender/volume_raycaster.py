@@ -6,7 +6,7 @@ import taichi as ti
 import taichi_glsl as tl
 import matplotlib.pyplot as plt
 import numpy as np
-from enum import Enum
+from enum import IntEnum
 from typing import Union, Tuple
 
 @ti.func
@@ -237,51 +237,6 @@ class VolumeRaycaster():
             self.tf_tex[low],
             self.tf_tex[min(high, ti.static(self.tf_tex.shape[0] - 1))], frac)
 
-    @ti.kernel # TODO: remove
-    def compute_entry_exit(self, sampling_rate: float, jitter: int):
-        ''' Produce entry, exit, rays, mask buffers
-
-        Args:
-            sampling_rate (float): Sampling rate (multiplier to Nyquist criterium)
-            jitter (int): Bool whether to apply jitter or not
-        '''
-        for i, j in self.entry:  # For all pixels
-            max_x = ti.static(float(self.render_tape.shape[0]))
-            max_y = ti.static(float(self.render_tape.shape[1]))
-            view_dir = (-self.cam_pos[None]).normalized()
-            # Bounding Box bottom left & top right
-            bb_bl = ti.static(tl.vec3(-1.0, -1.0, -1.0))
-            bb_tr = ti.static(tl.vec3(1.0, 1.0, 1.0))
-            x = (float(i) + 0.5) / max_x  # Get pixel centers in range (0,1)
-            y = (float(j) + 0.5) / max_y  #
-            self.rays[i, j] = self.get_ray_direction(
-                self.cam_pos[None], view_dir, x,
-                y)  # Get exact view direction to this pixel
-            tmin, tmax, hit = get_entry_exit_points(
-                self.cam_pos[None], self.rays[i, j], bb_bl, bb_tr
-            )  # distance along vd till volume entry and exit, hit bool
-
-            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
-            ray_len = tmax - tmin
-            n_samples = 1
-            if hit:  # Number of samples according to https://osf.io/u9qnz
-                n_samples = ti.cast(ti.floor(sampling_rate * ray_len * vol_diag), ti.int32) + 1
-            # if ti.static(jitter): # Add random offset for jitter
-            #     tmin += ti.random(dtype=float) * ray_len / n_samples
-            self.entry[i, j] = tmin
-            self.exit[i, j] = tmax
-            # self.rays[i, j] = vd
-            self.sample_step_nums[i, j] = min(self.max_samples, n_samples)
-
-    # @ti.ad.grad_replaced
-    # def compute_rays(self):
-    #     self.compute_rays_forward()
-
-    # @ti.ad.grad_for(compute_rays)
-    # def compute_rays_grad(self):
-    #     print(self)
-    #     self.compute_rays_backward()
-
     @ti.kernel
     def compute_rays(self):
         for i,j in self.rays:
@@ -328,13 +283,27 @@ class VolumeRaycaster():
             self.sample_step_nums[i,j] = min(self.max_samples, n_samples)
 
     @ti.kernel
+    def compute_intersections_nondiff(self, sampling_rate: float, jitter: int):
+        for i,j in self.entry:
+            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
+            bb_bl = ti.static(tl.vec3(-1.0))
+            bb_tr = ti.static(tl.vec3( 1.0))
+            tmin, tmax, hit = get_entry_exit_points(self.cam_pos[None], self.rays[i,j], bb_bl, bb_tr)
+
+            n_samples = 1
+            if hit:
+                n_samples = ti.cast(ti.floor(sampling_rate * vol_diag * (tmax - tmin)), ti.int32) + 1
+            self.entry[i,j] = tmin
+            self.exit[i,j] = tmax
+            self.sample_step_nums[i,j] = n_samples
+
+    @ti.kernel
     def raycast(self, sampling_rate: float):
         ''' Produce a rendering. Run compute_entry_exit first! '''
         for i, j in self.valid_sample_step_count:  # For all pixels
             for sample_idx in range(1, self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
-                if self.render_tape[i, j, sample_idx -1].w < 0.99 and sample_idx < ti.static(
-                                        self.max_samples):
+                if self.render_tape[i, j, sample_idx -1].w < 0.99 and sample_idx < ti.static(self.max_samples):
                     tmax = self.exit[i, j]
                     n_samples = self.sample_step_nums[i, j]
                     ray_len = (tmax - self.entry[i, j])
@@ -349,7 +318,6 @@ class VolumeRaycaster():
                     sample_color = self.apply_transfer_function(intensity)
                     opacity = 1.0 - ti.pow(1.0 - sample_color.w,
                                            1.0 / sampling_rate)
-
                     
                     if sample_color.w > 1e-3 and self.depth_tape[i, j, sample_idx - 1] == 0.0:
                         self.depth_tape[i, j, sample_idx] = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))     
@@ -428,7 +396,8 @@ class VolumeRaycaster():
         ''' Retrieves the final image from the tape if the `raycast_nondiff` method was used. '''
         for i, j in self.valid_sample_step_count:
             valid_sample_step_count = self.valid_sample_step_count[i, j] - 1
-            self.output_rgba[i, j] = ti.min(1.0, self.render_tape[i, j, 0])
+            rgba = self.render_tape[i, j, 0]
+            self.output_rgba[i, j] += rgba
             if valid_sample_step_count > self.max_valid_sample_step_count[None]:
                 self.max_valid_sample_step_count[
                     None] = valid_sample_step_count
@@ -695,13 +664,12 @@ class RaycastFunction(torch.autograd.Function):
                     None, None, None
     
     
-class Compositing(Enum):
-    Standard = 0
+class Mode(IntEnum):
     FirstHitDepth = 1
     MaxOpacity = 2
     MaxGradient = 3
-    Similarity = 4
-    WYSIWYP = 5
+    WYSIWYP = 4
+
 
 @ti.data_oriented
 class DepthRaycaster(VolumeRaycaster):
@@ -712,243 +680,162 @@ class DepthRaycaster(VolumeRaycaster):
                  tf_resolution=128,
                  fov=30.0,
                  nearfar=(0.1, 100.0),
-                 background_color=0.0,
-                 mode=Compositing.Standard,
-                 threshold=0.1):
+                 background_color=0.0):
             ''' Initializes Depth Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization '''
 
             ''' Extends the VolumeRaycaster with multiple Depth compositing modes'''
     
             super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
-            self.mode = mode
-            self.threshold= ti.field(ti.f32, ())
 
             render_tiles = tuple(map(lambda x: x // 8, render_resolution))
-            self.depth = ti.field(ti.f32, needs_grad=True)
-            self.depth_tape = ti.field(ti.f32, needs_grad=True)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth, self.depth.grad)
-            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape, self.depth_tape.grad)
+            self.depth = ti.field(ti.f32)
+            self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
+            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
+            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
 
-        def set_threshold(self, th):
-            self.threshold = th if th > 0 else 0
+        @ti.func
+        def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
+            tmax = self.exit[i, j]
+            n_samples = self.sample_step_nums[i, j]
+            ray_len = (tmax - self.entry[i, j])
+            tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+            dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+            return dist / self.far
 
         @ti.kernel
-        def raycast_nondiff(self, sampling_rate: float):
+        def raycast_nondiff(self, sampling_rate: float, mode: int):
             ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
 
             Args:
                 sampling_rate (float): Sampling rate (multiplier with Nyquist frequence)
+                mode (Mode): Rendering mode (Standard or different depth modes)
             '''
             for i, j in self.valid_sample_step_count:  # For all pixels
-                last_opacity = 0.0
+                maximum = 0.0           
+                opacity, old_agg_opacity = 0.0, 0.0
+                new_agg_sample = tl.vec4(0.0)
+
+                # WYSIWYP fields
+                biggest_jump = 0.0
+                interval_start = 0
+                interval_start_acc_opac = 0.0
+                current_d = 0.0
+                last_d = 0.0
+                current_dd = 0.0
+                last_dd = 0.0
+
                 for cnt in range(self.sample_step_nums[i, j]):
                     look_from = self.cam_pos[None]
-                    opacity = 0.0
                     if self.render_tape[i, j, 0].w < 0.99:
                         tmax = self.exit[i, j]      # letztes sample am austrittsort?
                         n_samples = self.sample_step_nums[i, j]
                         ray_len = (tmax - self.entry[i, j])
-                        tmin = self.entry[
-                            i,
-                            j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
+                        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                         vd = self.rays[i, j]
 
-                        t = float(cnt) / float(n_samples - 1)
-                        t_total = tl.mix(tmin, tmax, t) # save t for depth use
-                        pos = look_from + t_total * vd  # Current Pos
-
+                        dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
+                        pos = look_from + dist * vd  # Current Pos
+                        depth = dist / self.far
 
                         light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                         intensity = self.sample_volume_trilinear(pos)
                         sample_color = self.apply_transfer_function(intensity)
-                        opacity = 1.0 - ti.pow(1.0 - sample_color.w,
-                                            1.0 / sampling_rate)
+                        opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
                         if sample_color.w > 1e-3:
                             normal = self.get_volume_normal(pos)
-                            light_dir = (pos - light_pos).normalized(
-                            )  # Direction to light source
+                            light_dir = (pos - light_pos).normalized()  # Direction to light source
                             n_dot_l = max(normal.dot(light_dir), 0.0)
                             diffuse = self.diffuse * n_dot_l
-                            r = tl.reflect(light_dir,
-                                        normal)  # Direction of reflected light
+                            r = tl.reflect(light_dir, normal)  # Direction of reflected light
                             r_dot_v = max(r.dot(-vd), 0.0)
                             specular = self.specular * pow(r_dot_v, self.shininess)
 
-                            current = self.render_tape[i,j,0]
+                            # fill render tape according to selected mode
+                            render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                            old_agg_opacity = self.render_tape[i, j, 0].w
+                            new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                        else:
+                            old_agg_opacity = self.render_tape[i, j, 0].w
+                            new_agg_sample = self.render_tape[i, j, 0]
 
-                            # call compositing function according to selected mode
-                            # ugly if block, waiting for 3.10 match capabilities
-                            shaded_color = tl.vec4(0.0)
-                            if ti.static(self.mode == Compositing.Standard):
-                                shaded_color = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                        if mode == Mode.FirstHitDepth:
+                            if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                                self.depth[i, j] = depth
+                        elif mode == Mode.MaxOpacity:
+                            if sample_color.w > maximum and sample_color.w > 1e-3:
+                                self.depth[i, j] = depth
+                                maximum = sample_color.w
+                        elif mode == Mode.MaxGradient:
+                            grad = new_agg_sample.w - old_agg_opacity
+                            if grad > maximum:
+                                self.depth[i, j] = depth
+                                maximum = grad
+                        elif mode == Mode.WYSIWYP and cnt > 0:
+                            # calculate current derivative and dd (and think about better notation)
+                            current_d = new_agg_sample.w - old_agg_opacity
+                            current_dd = current_d - last_d
 
-                            elif ti.static(self.mode == Compositing.FirstHitDepth):
-                                shaded_color = tl.vec4(t, t, t, 1) if opacity > 0.0 and current == tl.vec4(0) else current
-                                
-                            elif ti.static(self.mode == Compositing.MaxOpacity):
-                                shaded_color = tl.vec4(t, t, t, opacity) if opacity > current.w else current
+                            # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
+                            if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
+                                    new_agg_sample.w >= 0.99:
+                                if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                    biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                    # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                    self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
 
-                            elif ti.static(self.mode == Compositing.MaxGradient):
-                                grad = opacity - last_opacity
-                                shaded_color = tl.vec4(t, t, t, grad) if grad > current.w else current
+                            # check for interval start (2nd derivative becomes positive)
+                            if last_dd <= 0.0 < current_dd:
+                                interval_start = cnt
+                                interval_start_acc_opac = new_agg_sample.w
 
-                            else:
-                                shaded_color = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                            # save current values in last_fields
+                            last_d = current_d
+                            last_dd = current_dd
 
-                            # for Standard mode, add current sample to render tape according to prev opacity
-                            if ti.static(self.mode == Compositing.Standard):
-                                self.render_tape[i,j,0] = (1.0 - self.render_tape[i, j, 0].w) * shaded_color + self.render_tape[i, j, 0]
-                            else: # for Depth Rendering just set the current color result
-                                self.render_tape[i,j,0] = shaded_color
+                        self.render_tape[i, j, 0] = new_agg_sample
                         
 
-                    # save opacity to be able to calc a gradient
-                    last_opacity = opacity
-                
-                # for the maximum composites, we need to set the opacity to 1 at the end (value represents the maximum while sampling)
-                if self.mode == Compositing.MaxGradient or self.mode == Compositing.MaxOpacity:
-                    self.render_tape[i, j, 0].w = 1
 
-        @ti.kernel
-        def get_final_image(self):
-            ''' Retrieves the final image from the `render_tape` to `output_rgba`. '''  
-            for i, j in self.valid_sample_step_count:
-                valid_sample_step_count = self.valid_sample_step_count[i, j] - 1
-                ns = self.sample_step_nums[i, j]
-                self.output_rgba[i, j] += self.render_tape[i, j,  max(0, ns - 1)]
-                if valid_sample_step_count > self.max_valid_sample_step_count[None]:
-                    self.max_valid_sample_step_count[None] = valid_sample_step_count
-
-        @ti.kernel
-        def calc_depth_information(self):
-            ''' Write the depth into the depth-field according to chosen mode. '''
-            #if ti.static(self.mode == Compositing.FirstHitDepth):
-            for i, j in self.valid_sample_step_count:            
-                # check along the render tape for the first hit
-                for x in range(1, self.sample_step_nums[i, j]):
-                    if self.render_tape[i, j, x].w > 1e-3 and self.depth_tape[i, j, x - 1] == 0.0:
-                        t = ti.cast((x/(self.sample_step_nums[i, j] - 1)), ti.f32)
-                        self.depth_tape[i, j, x] = t
-                    else:
-                        self.depth_tape[i, j, x] = self.depth_tape[i, j, x -1]
-
-
-            '''
-            if ti.static(self.mode == Compositing.MaxGradient):
-                for i, j in self.valid_sample_step_count:
-                    # note the biggest gradient along the ray
-                    for x in range(self.sample_step_nums[i, j]):
-                        currg = self.render_tape[i,j,x+1].w - self.render_tape[i,j,x].w
-                        if currg > self.threshold[None]:
-                            self.threshold[None] = currg
-                            t = float(x/(self.sample_step_nums[i, j] - 1))
-                            self.depth_tape[i, j, x + 1] = t
-                        else:
-                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
-                        if x == self.sample_step_nums[i, j] -1:
-                            # reset threshold for next pixel
-                            self.threshold[None] = 0
-
-            if ti.static(self.mode == Compositing.MaxOpacity):
-                for i, j in self.valid_sample_step_count:
-                    # note the biggest opacity along the ray
-                    for x in range(self.sample_step_nums[i, j]):
-                        curro = self.render_tape[i, j, x + 1].w
-                        if curro > self.threshold[None]:
-                            self.threshold[None] = curro
-                            t = float(x/(self.sample_step_nums[i, j] - 1))
-                            self.depth_tape[i, j, x + 1] = t
-                        else:
-                            self.depth_tape[i, j, x + 1] = self.depth_tape[i, j, x]
-                        if x == self.sample_step_nums[i, j] -1:
-                            # reset threshold for next pixel
-                            self.threshold[None] = 0
-            
-            
-            if ti.static(self.mode == Compositing.Similarity):
-                # find pixel that has the highest similarity score with the resulting pixel
-
-                # compare all samples to the resulting pixel and store t of sample with highest score as depth
-
-                for i, j in self.valid_sample_step_count:
-                    ns = self.sample_step_nums[i, j]
-                    max_score = 0.0
-                    x_at_max = 0
-                    for x in range(ns):
-                        score = tl.dot(self.output_rgba[i, j], self.samples[i, j, x])     ### TODO: save massive memory by not saving all samples, but this method will take longer then
-                        max_score = max(max_score, score)
-                        if score == max_score:
-                            x_at_max = x
-                    
-                    t = float(x_at_max/(ns -1))
-                    self.depth[i, j] = t
-            '''
-
-        # get depth image from depth_tape like get_final_image() ges the standard render from render_tape
-        @ti.kernel
-        def get_depth_image(self):
-            for i, j in self.valid_sample_step_count:
-                ns = self.sample_step_nums[i, j] + 1  # + 1 due to depth tape offset of 1
-                self.depth[i, j] += self.depth_tape[i, j,  max(0, ns - 1)]
-
-
-        @ti.kernel
-        def compute_loss(self):
-            for i,j in self.valid_sample_step_count:
-                self.loss[None] += ((self.depth[i,j] - 1.0) ** 2.0)  / (self.resolution[0] * self.resolution[1])
-
-        @ti.kernel
-        def clear_loss(self):
-            self.loss[None] = 0.0
-            
-        @ti.kernel
-        def mach_sachn(self):
-            for i, j in self.valid_sample_step_count:
-                self.depth[i, j] -= 10 * self.depth.grad[i, j]
-
-        @ti.kernel
-        def clear_framebuffer(self):
-            self.max_valid_sample_step_count[None] = 0
-            for i, j, k in self.render_tape:
-                self.render_tape[i, j, k] = tl.vec4(0.0)
-            for i, j in self.valid_sample_step_count:
-                self.valid_sample_step_count[i, j] = 1
-                self.output_rgba[i, j] = tl.vec4(0.0)
-            for i, j in self.depth:
-                self.depth[i, j] = 0.0
-            for i, j, k in self.depth_tape:
-                self.depth_tape[i, j, k] = 0.0
-
-        def clear_grad(self):
-            super().clear_grad()
-            self.depth.grad.fill(0.0)
-            self.depth_tape.grad.fill(0.0)
-
-
+        def visualize_ray(self, filename: str = None):
+            np_tape = self.depth_tape.to_numpy()[5000:6000]
+            fig, ax = plt.subplots()
+            ax.plot(np_tape)
+            if filename is None:
+                fig.savefig('ray(depth).png', bbox_inches='tight')
+            else:
+                fig.savefig(filename, bbox_inches='tight')
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
-     fov=30.0, near=0.1, far=100.0, ti_kwargs={}, background_color=0.0):
+                 fov=30.0, near=0.1, far=100.0, ti_kwargs=None, background_color=0.0, mode=None):
         super().__init__()
+        if ti_kwargs is None:
+            ti_kwargs = {}
         self.volume_shape = (volume_shape[2], volume_shape[0], volume_shape[1])
         self.output_shape = output_shape
         self.tf_shape = tf_shape
         self.sampling_rate = sampling_rate
         self.jitter = jitter
+        self.mode = mode
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
 
-        self.vr = VolumeRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
+        self.vr = DepthRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
          fov=fov, nearfar=(near, far), background_color=background_color)
 
+    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None, mode: Union[None, Mode] = None):
+        if mode is None:
+            if self.mode is not None:
+                mode = self.mode
+            else:
+                mode = Mode.FirstHitDepth
 
-    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None):
         with torch.no_grad() as _, autocast(False) as _:
             batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
             sr = sampling_rate if sampling_rate is not None else 4.0 * self.sampling_rate
             if batched:  # Batched Input
                 result = torch.zeros(bs,
                                     *self.vr.resolution,
-                                    4,
+                                    5,
                                     dtype=torch.float32,
                                     device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
@@ -960,11 +847,11 @@ class Raycaster(torch.nn.Module):
                     self.vr.set_tf_tex(tf_)
                     self.vr.clear_framebuffer()
                     self.vr.compute_rays()
-                    self.vr.compute_intersections(sr, False)
-                    # self.vr.compute_entry_exit(sr, False)
-                    self.vr.raycast_nondiff(sr)
+                    self.vr.compute_intersections_nondiff(sr, False)
+                    self.vr.raycast_nondiff(sr, mode)
                     self.vr.get_final_image_nondiff()
-                    result[i] = self.vr.output_rgba.to_torch(device=volume.device)
+                    result[i,...,:4] = self.vr.output_rgba.to_torch(device=volume.device)
+                    result[i,...,4]  = self.vr.depth.to_torch(device=volume.device)
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
                 return torch.flip(result, (2,)).permute(0, 3, 2, 1).contiguous()
             else:
@@ -973,12 +860,12 @@ class Raycaster(torch.nn.Module):
                 self.vr.set_tf_tex(tf_in)
                 self.vr.clear_framebuffer()
                 self.vr.compute_rays()
-                self.vr.compute_intersections(sr, False)
-                # self.vr.compute_entry_exit(sr, False)
-                self.vr.raycast_nondiff(sr)
+                self.vr.compute_intersections_nondiff(sr, False)
+                self.vr.raycast_nondiff(sr, mode)
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
-                return torch.flip(self.vr.output_rgba.to_torch(device=volume.device), (1, )).permute(2, 1, 0).contiguous()
+                rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device), self.vr.depth.to_torch(device=volume.device)], dim=-1)
+                return torch.flip(rgbad, (1, )).permute(2, 1, 0).contiguous()
 
     def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
         ''' seeks to mimic raycast_nondiff, but using the raycast method of the Volume raycaster
