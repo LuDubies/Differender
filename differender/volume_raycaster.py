@@ -346,50 +346,106 @@ class VolumeRaycaster():
                     self.render_tape[i, j, sample_idx] = self.render_tape[
                         i, j, sample_idx - 1]
 
+    @ti.func
+    def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
+        tmax = self.exit[i, j]
+        n_samples = self.sample_step_nums[i, j]
+        ray_len = (tmax - self.entry[i, j])
+        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+        dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+        return dist / self.far
+
     @ti.kernel
-    def raycast_nondiff(self, sampling_rate: float):
+    def raycast_nondiff(self, sampling_rate: float, mode: int):
         ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
 
         Args:
             sampling_rate (float): Sampling rate (multiplier with Nyquist frequence)
+            mode (Mode): Rendering mode (Standard or different depth modes)
         '''
         for i, j in self.valid_sample_step_count:  # For all pixels
+            maximum = 0.0           
+            opacity, old_agg_opacity = 0.0, 0.0
+            new_agg_sample = tl.vec4(0.0)
+
+            # WYSIWYP fields
+            biggest_jump = 0.0
+            interval_start = 0
+            interval_start_acc_opac = 0.0
+            current_d = 0.0
+            last_d = 0.0
+            current_dd = 0.0
+            last_dd = 0.0
+
             for cnt in range(self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
                 if self.render_tape[i, j, 0].w < 0.99:
-                    tmax = self.exit[i, j]
+                    tmax = self.exit[i, j]      # letztes sample am austrittsort?
                     n_samples = self.sample_step_nums[i, j]
                     ray_len = (tmax - self.entry[i, j])
-                    tmin = self.entry[
-                        i,
-                        j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
+                    tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                     vd = self.rays[i, j]
-                    pos = look_from + tl.mix(
-                        tmin, tmax,
-                        float(cnt) / float(n_samples - 1)) * vd  # Current Pos
+
+                    dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
+                    pos = look_from + dist * vd  # Current Pos
+                    depth = dist / self.far
+
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(pos)
                     sample_color = self.apply_transfer_function(intensity)
-                    opacity = 1.0 - ti.pow(1.0 - sample_color.w,
-                                           1.0 / sampling_rate)
-                    # if sample_color.w > 1e-3:
-                    normal = self.get_volume_normal(pos)
-                    light_dir = (pos - light_pos).normalized(
-                    )  # Direction to light source
-                    n_dot_l = max(normal.dot(light_dir), 0.0)
-                    diffuse = self.diffuse * n_dot_l
-                    r = tl.reflect(light_dir,
-                                   normal)  # Direction of reflected light
-                    r_dot_v = max(r.dot(-vd), 0.0)
-                    specular = self.specular * pow(r_dot_v, self.shininess)
-                    shaded_color = tl.vec4(
-                        (diffuse + specular + self.ambient) *
-                        sample_color.xyz * opacity * self.light_color,
-                        opacity)
-                    self.render_tape[
-                        i, j,
-                        0] = (1.0 - self.render_tape[i, j, 0].w
-                              ) * shaded_color + self.render_tape[i, j, 0]
+                    opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
+                    if sample_color.w > 1e-3:
+                        normal = self.get_volume_normal(pos)
+                        light_dir = (pos - light_pos).normalized()  # Direction to light source
+                        n_dot_l = max(normal.dot(light_dir), 0.0)
+                        diffuse = self.diffuse * n_dot_l
+                        r = tl.reflect(light_dir, normal)  # Direction of reflected light
+                        r_dot_v = max(r.dot(-vd), 0.0)
+                        specular = self.specular * pow(r_dot_v, self.shininess)
+
+                        # fill render tape according to selected mode
+                        render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                        old_agg_opacity = self.render_tape[i, j, 0].w
+                        new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                    else:
+                        old_agg_opacity = self.render_tape[i, j, 0].w
+                        new_agg_sample = self.render_tape[i, j, 0]
+
+                    if mode == Mode.FirstHitDepth:
+                        if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                            self.depth[i, j] = depth
+                    elif mode == Mode.MaxOpacity:
+                        if sample_color.w > maximum and sample_color.w > 1e-3:
+                            self.depth[i, j] = depth
+                            maximum = sample_color.w
+                    elif mode == Mode.MaxGradient:
+                        grad = new_agg_sample.w - old_agg_opacity
+                        if grad > maximum:
+                            self.depth[i, j] = depth
+                            maximum = grad
+                    elif mode == Mode.WYSIWYP and cnt > 0:
+                        # calculate current derivative and dd (and think about better notation)
+                        current_d = new_agg_sample.w - old_agg_opacity
+                        current_dd = current_d - last_d
+
+                        # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
+                        if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
+                                new_agg_sample.w >= 0.99:
+                            if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+
+                        # check for interval start (2nd derivative becomes positive)
+                        if last_dd <= 0.0 < current_dd:
+                            interval_start = cnt
+                            interval_start_acc_opac = new_agg_sample.w
+
+                        # save current values in last_fields
+                        last_d = current_d
+                        last_dd = current_dd
+
+                    self.render_tape[i, j, 0] = new_agg_sample
 
     @ti.kernel
     def get_final_image_nondiff(self):
@@ -670,141 +726,6 @@ class Mode(IntEnum):
     MaxGradient = 3
     WYSIWYP = 4
 
-
-@ti.data_oriented
-class DepthRaycaster(VolumeRaycaster):
-        def __init__(self,
-                 volume_resolution,
-                 render_resolution,
-                 max_samples=512,
-                 tf_resolution=128,
-                 fov=30.0,
-                 nearfar=(0.1, 100.0),
-                 background_color=0.0):
-            ''' Initializes Depth Raycaster. Make sure to .set_volume() and .set_tf_tex() after initialization '''
-
-            ''' Extends the VolumeRaycaster with multiple Depth compositing modes'''
-    
-            super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
-
-            render_tiles = tuple(map(lambda x: x // 8, render_resolution))
-            self.depth = ti.field(ti.f32)
-            self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-            ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
-            ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
-
-        @ti.func
-        def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
-            tmax = self.exit[i, j]
-            n_samples = self.sample_step_nums[i, j]
-            ray_len = (tmax - self.entry[i, j])
-            tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
-            dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
-            return dist / self.far
-
-        @ti.kernel
-        def raycast_nondiff(self, sampling_rate: float, mode: int):
-            ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
-
-            Args:
-                sampling_rate (float): Sampling rate (multiplier with Nyquist frequence)
-                mode (Mode): Rendering mode (Standard or different depth modes)
-            '''
-            for i, j in self.valid_sample_step_count:  # For all pixels
-                maximum = 0.0           
-                opacity, old_agg_opacity = 0.0, 0.0
-                new_agg_sample = tl.vec4(0.0)
-
-                # WYSIWYP fields
-                biggest_jump = 0.0
-                interval_start = 0
-                interval_start_acc_opac = 0.0
-                current_d = 0.0
-                last_d = 0.0
-                current_dd = 0.0
-                last_dd = 0.0
-
-                for cnt in range(self.sample_step_nums[i, j]):
-                    look_from = self.cam_pos[None]
-                    if self.render_tape[i, j, 0].w < 0.99:
-                        tmax = self.exit[i, j]      # letztes sample am austrittsort?
-                        n_samples = self.sample_step_nums[i, j]
-                        ray_len = (tmax - self.entry[i, j])
-                        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
-                        vd = self.rays[i, j]
-
-                        dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
-                        pos = look_from + dist * vd  # Current Pos
-                        depth = dist / self.far
-
-                        light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
-                        intensity = self.sample_volume_trilinear(pos)
-                        sample_color = self.apply_transfer_function(intensity)
-                        opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
-                        if sample_color.w > 1e-3:
-                            normal = self.get_volume_normal(pos)
-                            light_dir = (pos - light_pos).normalized()  # Direction to light source
-                            n_dot_l = max(normal.dot(light_dir), 0.0)
-                            diffuse = self.diffuse * n_dot_l
-                            r = tl.reflect(light_dir, normal)  # Direction of reflected light
-                            r_dot_v = max(r.dot(-vd), 0.0)
-                            specular = self.specular * pow(r_dot_v, self.shininess)
-
-                            # fill render tape according to selected mode
-                            render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                            old_agg_opacity = self.render_tape[i, j, 0].w
-                            new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
-                        else:
-                            old_agg_opacity = self.render_tape[i, j, 0].w
-                            new_agg_sample = self.render_tape[i, j, 0]
-
-                        if mode == Mode.FirstHitDepth:
-                            if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
-                                self.depth[i, j] = depth
-                        elif mode == Mode.MaxOpacity:
-                            if sample_color.w > maximum and sample_color.w > 1e-3:
-                                self.depth[i, j] = depth
-                                maximum = sample_color.w
-                        elif mode == Mode.MaxGradient:
-                            grad = new_agg_sample.w - old_agg_opacity
-                            if grad > maximum:
-                                self.depth[i, j] = depth
-                                maximum = grad
-                        elif mode == Mode.WYSIWYP and cnt > 0:
-                            # calculate current derivative and dd (and think about better notation)
-                            current_d = new_agg_sample.w - old_agg_opacity
-                            current_dd = current_d - last_d
-
-                            # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
-                            if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
-                                    new_agg_sample.w >= 0.99:
-                                if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                                    biggest_jump = new_agg_sample.w - interval_start_acc_opac
-                                    # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                    self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
-
-                            # check for interval start (2nd derivative becomes positive)
-                            if last_dd <= 0.0 < current_dd:
-                                interval_start = cnt
-                                interval_start_acc_opac = new_agg_sample.w
-
-                            # save current values in last_fields
-                            last_d = current_d
-                            last_dd = current_dd
-
-                        self.render_tape[i, j, 0] = new_agg_sample
-                        
-
-
-        def visualize_ray(self, filename: str = None):
-            np_tape = self.depth_tape.to_numpy()[5000:6000]
-            fig, ax = plt.subplots()
-            ax.plot(np_tape)
-            if filename is None:
-                fig.savefig('ray(depth).png', bbox_inches='tight')
-            else:
-                fig.savefig(filename, bbox_inches='tight')
-
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
                  fov=30.0, near=0.1, far=100.0, ti_kwargs=None, background_color=0.0, mode=None):
@@ -819,7 +740,7 @@ class Raycaster(torch.nn.Module):
         self.mode = mode
         ti.init(arch=ti.cuda, default_fp=ti.f32, **ti_kwargs)
 
-        self.vr = DepthRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
+        self.vr = VolumeRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
          fov=fov, nearfar=(near, far), background_color=background_color)
 
     def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None, mode: Union[None, Mode] = None):

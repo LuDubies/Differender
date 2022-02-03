@@ -10,14 +10,14 @@ from torchvision.utils import save_image
 
 
 if __name__ == '__main__':
-    vol_ds = TorchDataset('C:/Users/lucad/Uni/Differender/vtk_dat/')
+    vol_ds = TorchDataset('C:/Users/luca/Repos/Differender/vtk_dat/')
     vol = vol_ds[0]['vol'].float()
     tf = get_tf('tf1', 128)
     sr = 16.0
     pixels = 800
 
     raycaster = Raycaster(vol.shape[-3:], (pixels, pixels), 128, jitter=False, max_samples=1, sampling_rate=sr,
-                                ti_kwargs={'device_memory_GB': 2.0, 'debug': True}, far=5.0)
+                                ti_kwargs={'device_memory_GB': 4.0, 'debug': True}, far=5.0)
 
 
     vol = vol.to('cuda').requires_grad_(True)
@@ -40,5 +40,6 @@ if __name__ == '__main__':
             axs[1][2].imshow(im.squeeze()[:3].permute(1, 2, 0).cpu().numpy())
             axs[1][2].set_title(f"Standard")
 
-    fig.show()
+    #fig.show()
+    fig.savefig('nondiff_depths.png', bbox_inches='tight')
 
