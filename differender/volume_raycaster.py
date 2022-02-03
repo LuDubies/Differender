@@ -128,8 +128,6 @@ class VolumeRaycaster():
         ti.root.place(self.cam_pos, self.cam_pos.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.cam_pos_field, self.cam_pos_field.grad)
         ti.root.dense(ti.ij, render_resolution).dense(ti.ij, (8, 8)).place(self.depth, self.depth.grad)
-        ti.root.dense(ti.ijk, (*render_resolution, max_samples)).dense(
-            ti.ijk, (8, 8, 1)).place(self.depth_tape, self.depth_tape.grad)
 
     def set_volume(self, volume):
         self.volume.from_torch(volume.float())
@@ -307,41 +305,32 @@ class VolumeRaycaster():
                     tmax = self.exit[i, j]
                     n_samples = self.sample_step_nums[i, j]
                     ray_len = (tmax - self.entry[i, j])
-                    tmin = self.entry[
-                        i,
-                        j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
+                    tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                     vd = self.rays[i, j]
-                    self.pos_tape[i,j, sample_idx] = look_from + tl.mix(
-                        tmin, tmax, float(sample_idx) / float(n_samples - 1)) * vd  # Current Pos
+                    dist = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))
+                    self.pos_tape[i,j, sample_idx] = look_from + dist * vd  # Current Pos
+                    depth = dist / self.far
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(self.pos_tape[i,j, sample_idx])
                     sample_color = self.apply_transfer_function(intensity)
                     opacity = 1.0 - ti.pow(1.0 - sample_color.w,
                                            1.0 / sampling_rate)
-                    
-                    if sample_color.w > 1e-3 and self.depth_tape[i, j, sample_idx - 1] == 0.0:
-                        self.depth_tape[i, j, sample_idx] = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))     
-                    else:
-                        self.depth_tape[i, j, sample_idx] = self.depth_tape[i, j, sample_idx-1]
-
 
                     normal = self.get_volume_normal(self.pos_tape[i,j, sample_idx])
-                    light_dir = (
-                        self.pos_tape[i,j, sample_idx] -
-                        light_pos).normalized()  # Direction to light source
+                    light_dir = (self.pos_tape[i,j, sample_idx] - light_pos).normalized()  # Direction to light source
                     n_dot_l = max(normal.dot(light_dir), 0.0)
                     diffuse = self.diffuse * n_dot_l
-                    r = tl.reflect(light_dir,
-                                   normal)  # Direction of reflected light
+                    r = tl.reflect(light_dir, normal)  # Direction of reflected light
                     r_dot_v = max(r.dot(-vd), 0.0)
                     specular = self.specular * pow(r_dot_v, self.shininess)
-                    shaded_color = tl.vec4(
-                        ti.min(1.0, diffuse + specular + self.ambient) *
-                        sample_color.xyz * opacity * self.light_color, opacity)
-                    self.render_tape[i, j, sample_idx] = (
-                        1.0 - self.render_tape[i, j, sample_idx - 1].w
-                    ) * shaded_color + self.render_tape[i, j, sample_idx - 1]
+                    shaded_color = tl.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                    self.render_tape[i, j, sample_idx] = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * shaded_color + self.render_tape[i, j, sample_idx - 1]
                     self.valid_sample_step_count[i, j] += 1
+
+                    # calculate depth information
+                    if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                        self.depth[i, j] = depth
+
                 else:
                     self.render_tape[i, j, sample_idx] = self.render_tape[
                         i, j, sample_idx - 1]
@@ -403,7 +392,7 @@ class VolumeRaycaster():
                         r_dot_v = max(r.dot(-vd), 0.0)
                         specular = self.specular * pow(r_dot_v, self.shininess)
 
-                        # fill render tape according to selected mode
+                        # render normal image
                         render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                         old_agg_opacity = self.render_tape[i, j, 0].w
                         new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
@@ -411,6 +400,7 @@ class VolumeRaycaster():
                         old_agg_opacity = self.render_tape[i, j, 0].w
                         new_agg_sample = self.render_tape[i, j, 0]
 
+                    # calculate depth information according to mode
                     if mode == Mode.FirstHitDepth:
                         if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
                             self.depth[i, j] = depth
