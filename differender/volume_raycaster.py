@@ -566,9 +566,9 @@ class VolumeRaycaster():
     def visualize_tf(self, filename=None):
         fig, ax = plt.subplots()
         tf_np = self.tf_tex.to_numpy()
-        ax.plot(tf_np[:, 0], 'r-')
-        ax.plot(tf_np[:, 1], 'g-')
-        ax.plot(tf_np[:, 2], 'b-')
+        #ax.plot(tf_np[:, 0], 'r-')
+        #ax.plot(tf_np[:, 1], 'g-')
+        #ax.plot(tf_np[:, 2], 'b-')
         ax.plot(tf_np[:, 3], 'k-')
         if filename is None:
             fig.savefig('tf.png', bbox_inches='tight')
