@@ -43,6 +43,16 @@ if __name__ == '__main__':
     ax_gt.imshow(depth_gt)
     fig_gt.savefig('gt_depth.png', bbox_inches='tight')
 
+    vr.clear_framebuffer()
+    vr.clear_grad()
+    
+    im2 = raycaster(vol, tf, lf)
+    depth_diff = im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy()
+    fig_diff, ax_diff = plt.subplots()
+    ax_diff.imshow(depth_diff)
+    fig_diff.savefig('control.png', bbox_inches='tight')
+
+    quit()
     ''' 
     FORWARD PASS
     '''

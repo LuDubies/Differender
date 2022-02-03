@@ -112,7 +112,6 @@ class VolumeRaycaster():
 
         # add depth tape and depth_out
         self.depth = ti.field(ti.f32, needs_grad=True)
-        self.depth_tape = ti.field(ti.f32, needs_grad=True)
 
         volume_resolution = tuple(map(lambda d: d // 4, volume_resolution))
         render_resolution = tuple(map(lambda d: d // 8, render_resolution))
@@ -473,7 +472,6 @@ class VolumeRaycaster():
         self.valid_sample_step_count.fill(1)
         self.output_rgba.fill(tl.vec4(0.0))
         self.depth.fill(0.0)
-        self.depth_tape.fill(0.0)
 
     def clear_grad(self):
         ti.sync()
@@ -487,7 +485,6 @@ class VolumeRaycaster():
         self.exit.grad.fill(0.0)
         self.rays.grad.fill(tl.vec3(0.0))
         self.depth.grad.fill(0.0)
-        self.depth_tape.grad.fill(0.0)
 
     @ti.kernel
     def grad_nan_to_num(self):
@@ -626,8 +623,9 @@ class RaycastFunction(torch.autograd.Function):
                 vr.compute_intersections(sampling_rate , jitter)
                 # vr.compute_entry_exit(sampling_rate, jitter)
                 vr.raycast(sampling_rate)
-                vr.get_depth_image()
-                result[i] = vr.depth.to_torch(device=volume.device)
+                vr.get_final_image()
+                result[i,...,:4] = vr.output_rgba.to_torch(device=volume.device)
+                result[i,...,4]  = vr.depth.to_torch(device=volume.device)
             return result
         else: # Non-batched, single item
             # No saving via ctx.save_for_backward needed for single example, as it's saved inside vr
@@ -639,8 +637,8 @@ class RaycastFunction(torch.autograd.Function):
             vr.compute_rays()
             vr.compute_intersections(sampling_rate , jitter)
             vr.raycast(sampling_rate)
-            vr.get_depth_image()
-            return vr.depth.to_torch(device=volume.device)
+            vr.get_final_image()
+            return torch.cat([vr.output_rgba.to_torch(device=volume.device), vr.depth.to_torch(device=volume.device)], dim=-1)
 
     @staticmethod
     @custom_bwd
