@@ -27,11 +27,6 @@ if __name__ == '__main__':
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
     print(vol.shape, raycaster.volume_shape, tf.shape, lf)
-    
-    # use raycaster.determine_batched to get the dimensions right
-    batched, bs, vol_in, tf_in, lf_in = raycaster._determine_batch(vol, tf, lf)
-    print(f"Batched: {batched}, VolShape: {vol_in.shape}")
-
     vr = raycaster.vr
 
     """
@@ -39,20 +34,49 @@ if __name__ == '__main__':
     """
     im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr)
     depth_gt = im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy()
-    fig_gt, ax_gt = plt.subplots()
-    ax_gt.imshow(depth_gt)
-    fig_gt.savefig('gt_depth.png', bbox_inches='tight')
+    fig, axs = plt.subplots(3)
+    axs[0].imshow(depth_gt)
+    axs[0].set_title('Nondiff Raycast')
 
-    vr.clear_framebuffer()
-    vr.clear_grad()
-    
+    #  control image from raycasting with same tf
     im2 = raycaster(vol, tf, lf)
-    depth_diff = im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy()
-    fig_diff, ax_diff = plt.subplots()
-    ax_diff.imshow(depth_diff)
-    fig_diff.savefig('control.png', bbox_inches='tight')
+    depth_control = im2.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().detach().numpy()
+    axs[1].imshow(depth_control)
+    axs[1].set_title('Raycast')
+
+
+    """
+    SET GROUND TRUTH DEPTH
+    """
+    single_channel_depth = depth_gt[:, :, 0]
+    vr.set_gtd(single_channel_depth)
+
+    # calc test loss
+    vr.compute_loss()
+    print(f"Control-Loss is: {vr.loss[None]}")
+    
+
+
+    """
+    CHANGE TF
+    """
+    tf_changed = get_tf('tf1_changed', 128)
+    tf2 = tf_changed.to('cuda').requires_grad_(True)
+    im3 = raycaster(vol, tf2, lf)
+    depth_changed = im3.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().detach().numpy()
+    axs[2].imshow(depth_changed)
+    axs[2].set_title('Manipulated TF')
+    fig.savefig('depths.png', bbox_inches='tight')
+
+    vr.clear_loss()
+    vr.compute_loss()
+    print(f"Test-Loss is: {vr.loss[None]}")
 
     quit()
+
+
+
+
     ''' 
     FORWARD PASS
     '''

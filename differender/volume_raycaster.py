@@ -499,28 +499,21 @@ class VolumeRaycaster():
 
     @ti.kernel
     def compute_loss(self):
-        ''' exclude loss for rays missing the volume '''
-        for i, j in self.valid_sample_step_count:
-            if self.output_rgba[i, j].w < 1E-8:
-                self.ground_truth_depth[i, j] = 1
-
         for i,j in self.valid_sample_step_count:
-            # calculate the sample where we expect to have max opacity based on gt_depth
-            # could use better calculation to go from depth -> sample but like this we cant miss the calculated ra part
-            if self.ground_truth_depth[i, j] < 1:
-                expected_sample = ti.cast(self.ground_truth_depth[i, j] * self.sample_step_nums[i, j], ti.i32)      # ceil resulting in autodiff error, typecasting does not??
-                actual_opacity = self.render_tape[i, j, expected_sample].w
-                self.loss[None] += (1 - actual_opacity)**2 / (self.resolution[0] * self.resolution[1])
+            self.loss[None] += (self.depth[i, j] - self.ground_truth_depth[i, j])**2 / (self.resolution[0] * self.resolution[1])
 
     @ti.kernel
     def loss_grad(self):
         ''' manually calculate loss from distance to ground truth depth'''
         for i,j in self.valid_sample_step_count:
-            if self.ground_truth_depth[i, j] < 1:
-                expected_sample = ti.cast(self.ground_truth_depth[i, j] * self.sample_step_nums[i, j], ti.i32)      # ceil resulting in autodiff error, typecasting does not??
-                actual_opacity = self.render_tape[i, j, expected_sample].w
-                opacity_grad_at_ijs = -2 * (1 - actual_opacity) / (self.resolution[0] * self.resolution[1])
-                self.render_tape.grad[i, j, expected_sample] += tl.vec4(0.0, 0.0, 0.0, opacity_grad_at_ijs)
+            pass
+            # get sdx for depth & sdx for gtd
+
+            # sdxd > sdxt:
+            #    [sdxt: sdxd] get neg gradient (scaled with loss??)
+
+            # sdxd < sdxt:
+            #    [sdxt: sdxd] get pos gradient (opacity scaled with loss??) (need them to get to 0)
 
     @ti.kernel
     def apply_tf_grad(self):
@@ -621,7 +614,6 @@ class RaycastFunction(torch.autograd.Function):
                 vr.clear_framebuffer()
                 vr.compute_rays()
                 vr.compute_intersections(sampling_rate , jitter)
-                # vr.compute_entry_exit(sampling_rate, jitter)
                 vr.raycast(sampling_rate)
                 vr.get_final_image()
                 result[i,...,:4] = vr.output_rgba.to_torch(device=volume.device)
@@ -638,7 +630,7 @@ class RaycastFunction(torch.autograd.Function):
             vr.compute_intersections(sampling_rate , jitter)
             vr.raycast(sampling_rate)
             vr.get_final_image()
-            return torch.cat([vr.output_rgba.to_torch(device=volume.device), vr.depth.to_torch(device=volume.device)], dim=-1)
+            return torch.cat([vr.output_rgba.to_torch(device=volume.device), vr.depth.to_torch(device=volume.device).unsqueeze(-1)], dim=-1)
 
     @staticmethod
     @custom_bwd
