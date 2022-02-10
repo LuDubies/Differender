@@ -95,7 +95,7 @@ class VolumeRaycaster():
         self.sample_step_nums = ti.field(ti.i32)
         self.entry = ti.field(ti.f32)
         self.exit = ti.field(ti.f32)
-        self.loss = ti.field(ti.f32, shape=(), needs_grad=True)
+        self.loss = ti.field(ti.f32, shape=(), needs_grad=False)
         self.rays = ti.Vector.field(3, dtype=ti.f32)
         self.max_valid_sample_step_count = ti.field(ti.i32, ())
         self.max_samples = max_samples
@@ -108,10 +108,11 @@ class VolumeRaycaster():
         self.cam_pos = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
         self.cam_pos_field = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
         
-        self.ground_truth_depth = ti.field(shape=self.resolution, dtype=ti.f32)    
+            
 
-        # add depth tape and depth_out
+        # add depth field
         self.depth = ti.field(ti.f32, needs_grad=True)
+        self.ground_truth_depth = ti.field(shape=self.resolution, dtype=ti.f32)
 
         volume_resolution = tuple(map(lambda d: d // 4, volume_resolution))
         render_resolution = tuple(map(lambda d: d // 8, render_resolution))
@@ -343,6 +344,16 @@ class VolumeRaycaster():
         dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
         return dist / self.far
 
+    @ti.func
+    def get_sx_from_depth(self, depth: float, i: int, j: int) -> int:
+        tmax = self.exit[i, j]
+        n_samples = self.sample_step_nums[i, j]
+        ray_len = (tmax - self.entry[i, j])
+        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+        dist = depth * self.far
+        sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
+        return sx
+
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float, mode: int):
         ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
@@ -373,7 +384,6 @@ class VolumeRaycaster():
                     ray_len = (tmax - self.entry[i, j])
                     tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
                     vd = self.rays[i, j]
-
                     dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
                     pos = look_from + dist * vd  # Current Pos
                     depth = dist / self.far
@@ -459,12 +469,6 @@ class VolumeRaycaster():
                 self.max_valid_sample_step_count[
                     None] = valid_sample_step_count
 
-    @ti.kernel
-    def get_depth_image(self):
-        for i, j in self.valid_sample_step_count:
-            ns = tl.clamp(self.sample_step_nums[i, j], 1, self.max_samples-1)
-            self.depth[i, j] += self.depth_tape[i, j, ns - 1]
-
     def clear_framebuffer(self):
         ''' Clears the framebuffer `output_rgba` and the `render_tape`'''
         self.max_valid_sample_step_count.fill(0)
@@ -499,21 +503,50 @@ class VolumeRaycaster():
 
     @ti.kernel
     def compute_loss(self):
+        ''' manually calculate loss from distance to ground truth depth'''
         for i,j in self.valid_sample_step_count:
             self.loss[None] += (self.depth[i, j] - self.ground_truth_depth[i, j])**2 / (self.resolution[0] * self.resolution[1])
 
+    def set_loss(self, value):
+        self.loss[None] = value
+
     @ti.kernel
     def loss_grad(self):
-        ''' manually calculate loss from distance to ground truth depth'''
+        ''' calculate gradients for samples that have depth-defying opacity '''
         for i,j in self.valid_sample_step_count:
-            pass
-            # get sdx for depth & sdx for gtd
+            gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
+            cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
 
-            # sdxd > sdxt:
-            #    [sdxt: sdxd] get neg gradient (scaled with loss??)
+            if cd_sx > gt_sx:
+                #    [gt_sx: cd_sx) get neg gradient (scaled with loss??)
+                #    samples from gtd to actual depth need opacity
+                self.render_tape.grad[i, j, cd_sx - 1] = tl.vec4(0.0, 0.0, 0.0, 1)
 
-            # sdxd < sdxt:
-            #    [sdxt: sdxd] get pos gradient (opacity scaled with loss??) (need them to get to 0)
+            if cd_sx < gt_sx:
+                #    [cd_sx: gt_sx) get pos gradient (opacity scaled with loss??) (need them to get to 0)
+                #    samples before the truth depth should have 0 opacity
+                self.render_tape.grad[i, j, gt_sx - 1] =  tl.vec4(0.0, 0.0, 0.0, 1)
+
+    @ti.func
+    def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
+        tmax = self.exit[i, j]
+        n_samples = self.sample_step_nums[i, j]
+        ray_len = (tmax - self.entry[i, j])
+        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+        dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+        return dist / self.far
+
+    @ti.func
+    def get_sx_from_depth(self, depth: float, i: int, j: int) -> int:
+        tmax = self.exit[i, j]
+        n_samples = self.sample_step_nums[i, j]
+        ray_len = (tmax - self.entry[i, j])
+        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+        dist = depth * self.far
+        if i == 60:
+            print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth)
+        sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
+        return sx
 
     @ti.kernel
     def apply_tf_grad(self):

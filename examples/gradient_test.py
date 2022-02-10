@@ -1,5 +1,6 @@
 
 import math
+from torch import margin_ranking_loss
 from torchvtk.datasets import TorchDataset
 
 import numpy as np
@@ -9,6 +10,10 @@ from differender.volume_raycaster import Raycaster
 
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
+
+
+def print_field_info(field, name):
+        print(f"{name}:  Shape: {field.shape}, Max: {field.max()}, Min: {field.min()}, Mean: {field.mean()}, Sum: {field.sum()}")
 
 
 if __name__ == '__main__':
@@ -44,18 +49,25 @@ if __name__ == '__main__':
     axs[1].imshow(depth_control)
     axs[1].set_title('Raycast')
 
+    gt = depth_gt[:, :, 0]
+    control = depth_control[:, :, 0]
+
+    """
+    MANUAL TEST LOSS
+    """
+    def get_loss(truth, sample):
+        return (np.subtract(truth, sample)**2).mean()
+    
+    print(f"{'Manual-Loss is:':<20} {get_loss(gt, control):<20}")
+
+
 
     """
     SET GROUND TRUTH DEPTH
-    """
-    single_channel_depth = depth_gt[:, :, 0]
+    """    
+    single_channel_depth = gt.transpose()  # TODO set gt as ground truth and not control
     vr.set_gtd(single_channel_depth)
-
-    # calc test loss
-    vr.compute_loss()
-    print(f"Control-Loss is: {vr.loss[None]}")
-    
-
+    #vr.set_gtd(np.zeros((128, 128)))
 
     """
     CHANGE TF
@@ -68,35 +80,26 @@ if __name__ == '__main__':
     axs[2].set_title('Manipulated TF')
     fig.savefig('depths.png', bbox_inches='tight')
 
-    vr.clear_loss()
-    vr.compute_loss()
-    print(f"Test-Loss is: {vr.loss[None]}")
+    test = depth_changed[:, :, 0]
+    loss = get_loss(gt, test)
+    print(f"{'TF-Loss is:':<20} {loss:<20}")
+
+    vr.set_loss = loss
+
+    vr.loss_grad()
+
+    rtape_grad = vr.render_tape.grad.to_numpy()
+    print_field_info(rtape_grad, "manual_grads")
+    
+
+    ITERATIONS = 100
+
+
+
+    
 
     quit()
 
-
-
-
-    ''' 
-    FORWARD PASS
-    '''
-    vr.clear_grad()
-    vr.set_cam_pos(lf_in)
-    vr.set_volume(vol_in)
-    vr.set_tf_tex(tf_in)
-    vr.set_gtd(gtd=np.full((128, 128), GTD, dtype=np.float32))
-    vr.clear_framebuffer()
-    vr.compute_rays()
-    vr.compute_intersections(sr, 0)
-
-    vr.raycast(sr)
-    vr.get_final_image()
-    vr.compute_loss()
-
-    def print_field_info(field, name):
-        print(f"{name}:  Shape: {field.shape}, Max: {field.max()}, Min: {field.min()}, Mean: {field.mean()}, Sum: {field.sum()}")
-    
-    print(f"Calculated loss is: {vr.loss}")
 
     '''
     MANUAL LOSS FROM GTD
