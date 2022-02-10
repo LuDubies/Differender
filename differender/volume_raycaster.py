@@ -543,9 +543,11 @@ class VolumeRaycaster():
         ray_len = (tmax - self.entry[i, j])
         tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
         dist = depth * self.far
-        if i == 60:
-            print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth)
+        
         sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
+        sx = tl.clamp(sx, 0, n_samples-1)
+        if i == 60 and j == 123:
+            print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth, 'sx=', sx)
         return sx
 
     @ti.kernel
