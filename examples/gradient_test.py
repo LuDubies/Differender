@@ -39,10 +39,14 @@ if __name__ == '__main__':
     """
     im = raycaster.raycast_nondiff(vol[None], tf[None], lf[None], sampling_rate=sr)
     depth_gt = im.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().numpy()
-    fig, axs = plt.subplots(3)
+    fig, axs = plt.subplots(1, 3, figsize=(30, 95))
+    axs = axs.flat
     axs[0].imshow(depth_gt)
     axs[0].set_title('Nondiff Raycast')
 
+    """
+    RAYCAST WITH UNCHANGED TF
+    """
     #  control image from raycasting with same tf
     im2 = raycaster(vol, tf, lf)
     depth_control = im2.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().detach().numpy()
@@ -65,7 +69,7 @@ if __name__ == '__main__':
     """
     SET GROUND TRUTH DEPTH
     """    
-    single_channel_depth = gt.transpose()  # TODO set gt as ground truth and not control
+    single_channel_depth = gt.transpose()
     vr.set_gtd(single_channel_depth)
     #vr.set_gtd(np.zeros((128, 128)))
 
@@ -79,7 +83,7 @@ if __name__ == '__main__':
     axs[2].imshow(depth_changed)
     axs[2].set_title('Manipulated TF')
     fig.savefig('depths.png', bbox_inches='tight')
-
+    
     test = depth_changed[:, :, 0]
     loss = get_loss(gt, test)
     print(f"{'TF-Loss is:':<20} {loss:<20}")
@@ -88,15 +92,28 @@ if __name__ == '__main__':
 
     vr.loss_grad()
 
-    rtape_grad = vr.render_tape.grad.to_numpy()
-    print_field_info(rtape_grad, "manual_grads")
     
+    
+    """
+    VISUALIZE SOME DATA
+    """
+    vr.visualize_ray('a', 60, 60, filename='testray.png')
+    rtape_grad = vr.render_tape.grad.to_numpy()
+    print_field_info(rtape_grad, "RenderTape Gradient Field")
+
+
 
     ITERATIONS = 100
 
 
+    vr.raycast.grad(sr)
+    tf_grad = vr.tf_tex.grad.to_numpy()
 
+    print_field_info(tf_grad[:, 0], "tf_gradient_r")
+    print_field_info(tf_grad[:, 1], "tf_gradient_g")
+    print_field_info(tf_grad[:, 2], "tf_gradient_b")
     
+    print_field_info(tf_grad[:, 3], "tf_gradient_a")
 
     quit()
 

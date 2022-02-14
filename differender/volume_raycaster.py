@@ -111,8 +111,9 @@ class VolumeRaycaster():
             
 
         # add depth field
-        self.depth = ti.field(ti.f32, needs_grad=True)
+        self.depth = ti.field(ti.f32)
         self.ground_truth_depth = ti.field(shape=self.resolution, dtype=ti.f32)
+        self.depth_indices = ti.Vector.field(2, shape=self.resolution, dtype=ti.i32)
 
         volume_resolution = tuple(map(lambda d: d // 4, volume_resolution))
         render_resolution = tuple(map(lambda d: d // 8, render_resolution))
@@ -520,12 +521,12 @@ class VolumeRaycaster():
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) get neg gradient (scaled with loss??)
                 #    samples from gtd to actual depth need opacity
-                self.render_tape.grad[i, j, cd_sx - 1] = tl.vec4(0.0, 0.0, 0.0, 1)
+                self.render_tape.grad[i, j, cd_sx - 1] = tl.vec4(0.0, 0.0, 0.0, 1.0)
 
             if cd_sx < gt_sx:
                 #    [cd_sx: gt_sx) get pos gradient (opacity scaled with loss??) (need them to get to 0)
                 #    samples before the truth depth should have 0 opacity
-                self.render_tape.grad[i, j, gt_sx - 1] =  tl.vec4(0.0, 0.0, 0.0, 1)
+                self.render_tape.grad[i, j, gt_sx - 1] =  tl.vec4(0.0, 0.0, 0.0, -1.0)
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -545,9 +546,9 @@ class VolumeRaycaster():
         dist = depth * self.far
         
         sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
+        #if sx < 0:
+        #    print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth, 'sx=', sx)
         sx = tl.clamp(sx, 0, n_samples-1)
-        if i == 60 and j == 123:
-            print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth, 'sx=', sx)
         return sx
 
     @ti.kernel
@@ -559,15 +560,23 @@ class VolumeRaycaster():
     def clear_loss(self):
         self.loss[None] = 0.0
 
+    @ti.kernel
+    def fill_depth_sx_field(self):
+        for i, j in self.valid_sample_step_count:
+            self.depth_indices[i, j] = tl.vec2(self.get_sx_from_depth(self.depth[i, j], i, j), self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j))        
+
     def visualize_ray(self, rgba: Union[str, None] = None, i: int = None, j: int = None, filename: str = None):
         r = rgba is None or 'r' in rgba
         g = rgba is None or 'g' in rgba
         b = rgba is None or 'b' in rgba
         a = rgba is None or 'a' in rgba
 
+        self.fill_depth_sx_field()
+
         def trim_to_volume(data: np.array) -> Tuple[int, int]:
             not_zero = data > 0.0001
             first_idx = not_zero.argmax()
+            first_idx = max(0, first_idx - 10)
             last_idx = not_zero.size - not_zero[::-1].argmax() -1
 
             return first_idx, last_idx
@@ -583,6 +592,10 @@ class VolumeRaycaster():
             l = max(l, ld)
             axes[0].plot(range(f, l+1), data[f:l+1], color_fmt)
             axes[1].plot(range(f, l+1), deriv[f:l+1], color_fmt)
+            axes[0].axvline(self.depth_indices[i, j].x, color='r', alpha=0.5)
+            axes[0].axvline(self.depth_indices[i, j].y, color='g', alpha=0.5)
+            axes[0].text(0, 0, f"GTD-D = {self.depth_indices[i, j].y - self.depth_indices[i, j].x}")
+            axes[0].text(0, 0.5, f"{i=}, {j=}")
 
         if i is None:
             i = self.resolution[0] // 2
