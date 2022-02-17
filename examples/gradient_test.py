@@ -78,6 +78,8 @@ if __name__ == '__main__':
     """
     tf_changed = get_tf('tf1_changed', 128)
     tf2 = tf_changed.to('cuda').requires_grad_(True)
+
+
     im3 = raycaster(vol, tf2, lf)
     depth_changed = im3.squeeze()[[4, 4, 4]].permute(1, 2, 0).cpu().detach().numpy()
     axs[2].imshow(depth_changed)
@@ -86,14 +88,14 @@ if __name__ == '__main__':
     
     test = depth_changed[:, :, 0]
     loss = get_loss(gt, test)
-    print(f"{'TF-Loss is:':<20} {loss:<20}")
+    print(f"{'TF-Loss  is:':<20} {loss:<20}")
 
     vr.set_loss = loss
 
     vr.loss_grad()
 
-    
-    
+
+
     """
     VISUALIZE SOME DATA
     """
@@ -101,20 +103,21 @@ if __name__ == '__main__':
     rtape_grad = vr.render_tape.grad.to_numpy()
     print_field_info(rtape_grad, "RenderTape Gradient Field")
 
-
-
-    ITERATIONS = 100
-
-
     vr.raycast.grad(sr)
     tf_grad = vr.tf_tex.grad.to_numpy()
 
-    print_field_info(tf_grad[:, 0], "tf_gradient_r")
-    print_field_info(tf_grad[:, 1], "tf_gradient_g")
-    print_field_info(tf_grad[:, 2], "tf_gradient_b")
-    
     print_field_info(tf_grad[:, 3], "tf_gradient_a")
 
+    #print(f"Negative grad count: {len([x for x in tf_grad[:, 3] if x < 0])}")
+    #print(f"Positive grad count: {len([x for x in tf_grad[:, 3] if x > 0])}")
+
+    """
+    TEST TF CHANGES
+    
+    vr.visualize_tf('tf_before.png')
+    vr.apply_tf_grad()
+    vr.visualize_tf('tf_after.png')
+    """
     quit()
 
 
