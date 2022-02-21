@@ -22,7 +22,6 @@ if __name__ == '__main__':
     tf = get_tf('tf1', 128)
     sr = 16.0
 
-    GTD = 0.6
 
     raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048,
                             ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True}, far=5.0)
@@ -95,7 +94,6 @@ if __name__ == '__main__':
     vr.loss_grad()
 
 
-
     """
     VISUALIZE SOME DATA
     """
@@ -118,58 +116,6 @@ if __name__ == '__main__':
     vr.apply_tf_grad()
     vr.visualize_tf('tf_after.png')
     """
-    quit()
 
 
-    '''
-    MANUAL LOSS FROM GTD
-    '''
-    vr.compute_loss.grad()
-    rtape_grad = vr.render_tape.grad.to_numpy() 
-    print_field_info(rtape_grad, "render_tape_gradient")
-
-    vr.loss_grad()
-    rtape_grad = vr.render_tape.grad.to_numpy()
-    print_field_info(rtape_grad, "manual_grads")
-
-    vr.raycast.grad(sr)
-
-    vr.visualize_ray()
-
-    '''
-    SHOW RESULTS
-    '''
-    tf_grad = vr.tf_tex.grad.to_numpy()
-    '''
-    print_field_info(tf_grad[:, 0], "tf_gradient_r")
-    print_field_info(tf_grad[:, 1], "tf_gradient_g")
-    print_field_info(tf_grad[:, 2], "tf_gradient_b")
-    '''
-    print_field_info(tf_grad[:, 3], "tf_gradient_a")
-    fig, ax = plt.subplots()
-    ax.plot(tf_grad[:, 3], 'k-')
-    fig.savefig('tf_grad.png', bbox_inches='tight')
-
-    print(f"tf at 0: {tf_grad[0, 3]}")
-    print(f"tf at 1: {tf_grad[1, 3]}")
-    print(f"tf at 2: {tf_grad[2, 3]}")
-    print(f"tf at 3: {tf_grad[3, 3]}")
-    print(f"tf at 4: {tf_grad[4, 3]}")
-    print(f"tf at 5: {tf_grad[5, 3]}")
-    print(f"tf at 6: {tf_grad[6, 3]}")
-    print(f"tf at 7: {tf_grad[7, 3]}")
-
-
-
-
-    ''' 
-    print_field_info(tf_grad[0][10:], "tf_gradient_r")
-    print_field_info(tf_grad[1][10:], "tf_gradient_g")
-    print_field_info(tf_grad[2][10:], "tf_gradient_b")
-    print_field_info(tf_grad[3][10:], "tf_gradient_a")
-    '''
-
-    vr.visualize_tf(f'tf_before.png')
-    vr.apply_tf_grad()
-    vr.visualize_tf(f'tf_after(gtd{GTD}).png')
     

@@ -491,9 +491,9 @@ class VolumeRaycaster():
             gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
             cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
 
+            
             if cd_sx > gt_sx:
-                #    [gt_sx: cd_sx) get pos gradient (scaled with loss??)
-                #    need to raise opacity at gtd
+                #    [gt_sx: cd_sx) need to raise opacity at gtd
                 #self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, 1.0)
                 self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
@@ -502,6 +502,16 @@ class VolumeRaycaster():
                 #    need to decrease opacity at cd_sx
                 #self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -1.0)
                 self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
+            
+
+            """
+            if self.depth.grad[i, j] > 0:
+                # need more depth, have to decrease opacity at current depth
+                self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, self.depth.grad[i, j])
+            if self.depth.grad[i, j] < 0:
+                # need less depth -> opacity is missing at ground truth depth
+                self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, self.depth.grad[i, j])
+            """
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -527,13 +537,10 @@ class VolumeRaycaster():
         return sx
 
     @ti.kernel
-    def apply_tf_grad(self):
-        for i in range(self.tf_tex.shape[0]):
-            self.tf_tex[i] += self.tf_tex.grad[i]
-
-    @ti.kernel
-    def clear_loss(self):
-        self.loss[None] = 0.0
+    def reset_low_intensity_grads(self):
+        self.tf_tex.grad[0].fill(0.0)
+        self.tf_tex.grad[1].fill(0.0)
+        self.tf_tex.grad[2].fill(0.0)
 
     @ti.kernel
     def fill_depth_sx_field(self):
@@ -676,35 +683,25 @@ class RaycastFunction(torch.autograd.Function):
                 ctx.vr.set_tf_tex(tf)
                 ctx.vr.clear_grad()
                 ctx.vr.clear_framebuffer()
+
                 # Forward
                 ctx.vr.compute_rays()
                 ctx.vr.compute_intersections(ctx.sampling_rate , ctx.jitter)
                 ctx.vr.raycast(ctx.sampling_rate)
                 ctx.vr.get_final_image()
-                # Backward
 
-                ctx.vr.depth.grad.from_torch(grad_output[i, :, :, 4])
-                ctx.vr.loss_grad()
+                # Backward
+                ctx.vr.depth.grad.from_torch(grad_output[i,..., 4])
+                ctx.vr.transfer_depth_gradients_to_render_tape()
                 ctx.vr.raycast.grad(ctx.sampling_rate)
                 # print('Output RGBA', torch.nan_to_num(ctx.vr.output_rgba.grad.to_torch(device=dev)).abs().max())
                 # print('Render Tape', torch.nan_to_num(ctx.vr.render_tape.grad.to_torch(device=dev)).abs().max())
                 # print('TF', torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)).abs().max())
-                # print('Volume', torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)).abs().max())
-                # print('Entry', torch.nan_to_num(ctx.vr.entry.grad.to_torch(device=dev)).abs().max())
-                # print('Exit', torch.nan_to_num(ctx.vr.entry.grad.to_torch(device=dev)).abs().max())
                 ctx.vr.grad_nan_to_num()
                 ctx.vr.compute_rays.grad()
-                # print('AUTODIFF CamPos Field', ctx.vr.cam_pos_field)
-                # print('AUTODIFF Camera Pos / Grad', ctx.vr.cam_pos, ctx.vr.cam_pos.grad)
-                # ctx.vr.grad_nan_to_num()
-                # ctx.vr.compute_rays_backward()
-                # ti.sync()
-                # print('MANUAL CamPos Field', ctx.vr.cam_pos_field)
-                # print('MANUAL Camera Pos', ctx.vr.cam_pos.grad)
                 ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
-                # print('Entry', ctx.vr.entry.grad)
-                # print('Camera Pos', ctx.vr.cam_pos.grad)
-                # ctx.vr.compute_entry_exit.grad(ctx.sampling_rate, ctx.jitter)
+
+                ctx.vr.reset_low_intensity_grads()
 
                 volume_grad[i] = torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev))
                 tf_grad[i] = torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev))
@@ -713,12 +710,13 @@ class RaycastFunction(torch.autograd.Function):
 
         else: # Non-batched, single item
             ctx.vr.clear_grad()
-            ctx.vr.depth.grad.from_torch(grad_output[:, :, 4])
+            ctx.vr.depth.grad.from_torch(grad_output[..., 4])
+            ctx.vr.transfer_depth_gradients_to_render_tape()
             ctx.vr.raycast.grad(ctx.sampling_rate)
-
-            ctx.vr.grad_nan_to_num()
             ctx.vr.compute_rays.grad()
             ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
+
+            ctx.vr.reset_low_intensity_grads()
 
             return None, \
                 torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)), \

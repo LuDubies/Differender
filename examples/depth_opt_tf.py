@@ -12,10 +12,6 @@ from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 
 
-def print_field_info(field, name):
-        print(f"{name}:  Shape: {field.shape}, Max: {field.max()}, Min: {field.min()}, Mean: {field.mean()}, Sum: {field.sum()}")
-
-
 if __name__ == '__main__':
 
     ITERATIONS = 100
@@ -34,24 +30,37 @@ if __name__ == '__main__':
     tf = get_tf('tf1_changed', 128).to('cuda').requires_grad_(True)
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
-    print(vol.shape, raycaster.volume_shape, tf.shape, lf)
     vr = raycaster.vr
 
     opt = torch.optim.Adam([tf])
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=1e-3, total_steps=ITERATIONS)
 
 
     for i in range(ITERATIONS):
         with torch.no_grad():
             im_gt = raycaster.raycast_nondiff(vol.detach(), tf_gt.detach(), lf.detach(), sampling_rate=sr)
+            depth_gt = im_gt.squeeze()[4]
+            vr.set_gtd(depth_gt)
+        
         opt.zero_grad()
         res = raycaster(vol, tf, lf)
-        mse_loss = F.mse_loss(res, im_gt)
+        depth_res = res.squeeze()[4]
+        mse_loss = F.mse_loss(depth_res, depth_gt)
+        mse_loss.backward()
 
-        print(f"Step {i:03d}: MSE-LOSS: {mse_loss.detach().item():.5f}")
+        print(f"Step {i:03d}: MSE-LOSS: {mse_loss.detach().item():.6e}")
 
         opt.step()
-        sched.step()
 
         with torch.no_grad():
             tf.clamp_(0.0, 1.0)
+
+        # create a control image for gt and raycasting
+        if i == 0:
+            with torch.no_grad():
+                control1 = torch.unsqueeze(depth_gt.detach(), 0).expand(3, 128, 128).permute(1, 2, 0).cpu().numpy()
+                control2 = torch.unsqueeze(depth_res.detach(), 0).expand(3, 128, 128).permute(1, 2, 0).cpu().numpy()
+                fig, axs = plt.subplots(1, 2)
+                axs = axs.flat
+                axs[0].imshow(control1)
+                axs[1].imshow(control2)
+                fig.savefig('control.png', bbox_inches='tight')
