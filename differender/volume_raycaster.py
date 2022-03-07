@@ -1,3 +1,4 @@
+from turtle import color
 from numpy.core.fromnumeric import shape
 from taichi_glsl.sampling import D
 import torch
@@ -111,6 +112,7 @@ class VolumeRaycaster():
             
 
         # add depth field
+        self.no_hit_depth = 1.0
         self.depth = ti.field(ti.f32, needs_grad=True)
         self.ground_truth_depth = ti.field(shape=self.resolution, dtype=ti.f32)
         self.depth_indices = ti.Vector.field(2, shape=self.resolution, dtype=ti.i32)
@@ -140,7 +142,7 @@ class VolumeRaycaster():
         self.cam_pos.from_torch(cam_pos.float())
 
     def set_gtd(self, gtd):
-        self.ground_truth_depth.from_numpy(gtd)
+        self.ground_truth_depth.from_torch(gtd.permute(1, 0).float())
 
     @ti.func # TODO: remove
     def get_ray_direction(self, orig, view_dir, x: float, y: float):
@@ -307,10 +309,11 @@ class VolumeRaycaster():
                     n_samples = self.sample_step_nums[i, j]
                     ray_len = (tmax - self.entry[i, j])
                     tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
-                    vd = self.rays[i, j]
                     dist = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))
-                    self.pos_tape[i,j, sample_idx] = look_from + dist * vd  # Current Pos
                     depth = dist / self.far
+                    vd = self.rays[i, j]
+                    self.pos_tape[i,j, sample_idx] = look_from + dist * vd  # Current Pos
+
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(self.pos_tape[i,j, sample_idx])
                     sample_color = self.apply_transfer_function(intensity)
@@ -329,12 +332,11 @@ class VolumeRaycaster():
                     self.valid_sample_step_count[i, j] += 1
 
                     # calculate depth information
-                    if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                    if sample_color.w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
                         self.depth[i, j] = depth
 
                 else:
-                    self.render_tape[i, j, sample_idx] = self.render_tape[
-                        i, j, sample_idx - 1]
+                    self.render_tape[i, j, sample_idx] = self.render_tape[i, j, sample_idx - 1]
 
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float, mode: int):
@@ -365,10 +367,10 @@ class VolumeRaycaster():
                     n_samples = self.sample_step_nums[i, j]
                     ray_len = (tmax - self.entry[i, j])
                     tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
-                    vd = self.rays[i, j]
                     dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
-                    pos = look_from + dist * vd  # Current Pos
                     depth = dist / self.far
+                    vd = self.rays[i, j]
+                    pos = look_from + dist * vd  # Current Pos
 
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(pos)
@@ -393,7 +395,7 @@ class VolumeRaycaster():
 
                     # calculate depth information according to mode
                     if mode == Mode.FirstHitDepth:
-                        if sample_color.w > 1e-3 and self.depth[i, j] == 0.0:
+                        if sample_color.w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
                             self.depth[i, j] = depth
                     elif mode == Mode.MaxOpacity:
                         if sample_color.w > maximum and sample_color.w > 1e-3:
@@ -457,7 +459,7 @@ class VolumeRaycaster():
         self.render_tape.fill(tl.vec4(0.0))
         self.valid_sample_step_count.fill(1)
         self.output_rgba.fill(tl.vec4(0.0))
-        self.depth.fill(0.0)
+        self.depth.fill(self.no_hit_depth)
 
     def clear_grad(self):
         ti.sync()
@@ -491,27 +493,15 @@ class VolumeRaycaster():
             gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
             cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
 
-            
+
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
-                #self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, 1.0)
                 self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
             if cd_sx < gt_sx:
-                #    [cd_sx: gt_sx) get neg gradient (opacity scaled with loss??) (need them to get to 0)
-                #    need to decrease opacity at cd_sx
-                #self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -1.0)
+                #    [cd_sx: gt_sx) need to decrease opacity at cd_sx
                 self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
             
-
-            """
-            if self.depth.grad[i, j] > 0:
-                # need more depth, have to decrease opacity at current depth
-                self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, self.depth.grad[i, j])
-            if self.depth.grad[i, j] < 0:
-                # need less depth -> opacity is missing at ground truth depth
-                self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, self.depth.grad[i, j])
-            """
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -524,16 +514,19 @@ class VolumeRaycaster():
 
     @ti.func
     def get_sx_from_depth(self, depth: float, i: int, j: int) -> int:
-        tmax = self.exit[i, j]
         n_samples = self.sample_step_nums[i, j]
-        ray_len = (tmax - self.entry[i, j])
-        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
-        dist = depth * self.far
-        
-        sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
-        #if sx < 0:
-        #    print('For coordinates ', i, j, 'tmin=', tmin, 'tmax=', tmax, 'n_samples=', n_samples, 'dist=', dist, 'depth=', depth, 'sx=', sx)
-        sx = tl.clamp(sx, 0, n_samples-1)
+        # if depth is 1 (backplane is hit) we return n_samples
+        sx = -1
+        if depth == 1.0:
+            sx = n_samples
+        else:
+            tmax = self.exit[i, j]
+            ray_len = (tmax - self.entry[i, j])
+            tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+            dist = depth * self.far
+            
+            sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
+            sx = tl.clamp(sx, 0, n_samples-1)
         return sx
 
     @ti.kernel
@@ -566,7 +559,7 @@ class VolumeRaycaster():
         def get_deriv(data: np.array) -> np.array:
             return np.clip(np.gradient(data), 0, None)
 
-        def plot_data(data: np.array, axes: Tuple[plt.axes, plt.axes], color_fmt: str):
+        def plot_data(data: np.array, axes: Tuple[plt.axes], color_fmt: str, gradients: Union[None, np.array] = None):
             deriv = get_deriv(data)
             f, l = trim_to_volume(data)
             fd, ld = trim_to_volume(deriv)
@@ -578,21 +571,34 @@ class VolumeRaycaster():
             axes[0].axvline(self.depth_indices[i, j].y, color='g', alpha=0.5)
             axes[0].text(0, 0, f"GTD-D = {self.depth_indices[i, j].y - self.depth_indices[i, j].x}")
             axes[0].text(0, 0.5, f"{i=}, {j=}")
+            if gradients is not None and len(axes) > 2:
+                axes[2].plot(range(f, l+1), gradients[f:l+1], color_fmt)
+                axes[2].axvline(self.depth_indices[i, j].x, color='r', alpha=0.5)
+                axes[2].axvline(self.depth_indices[i, j].y, color='g', alpha=0.5)
 
         if i is None:
             i = self.resolution[0] // 2
         if j is None:
             j = self.resolution[1] // 2
         np_tape = self.render_tape.to_numpy()[i, j, :, :]
-        fig, (ax, dx) = plt.subplots(2, 1)
+
+        # get additional gradient information
+        rtape_grads = self.render_tape.grad.to_numpy()[i, j, :, 3]
+        if np.all(rtape_grads == 0.0):
+            rtape_grads = None
+
+        if rtape_grads is None:
+            fig, axes = plt.subplots(2, 1)
+        else:
+            fig, axes = plt.subplots(3, 1)
         if r:
-            plot_data(np_tape[:, 0], (ax, dx), 'r-')
+            plot_data(np_tape[:, 0], axes, 'r-')
         if g:
-            plot_data(np_tape[:, 1], (ax, dx), 'g-')
+            plot_data(np_tape[:, 1], axes, 'g-')
         if b:
-            plot_data(np_tape[:, 2], (ax, dx), 'b-')
+            plot_data(np_tape[:, 2], axes, 'b-')
         if a:
-            plot_data(np_tape[:, 3], (ax, dx), 'k-')
+            plot_data(np_tape[:, 3], axes, 'k-', gradients=rtape_grads)
         if filename is None:
             fig.savefig('demo.png', bbox_inches='tight')
         else:
@@ -701,8 +707,6 @@ class RaycastFunction(torch.autograd.Function):
                 ctx.vr.compute_rays.grad()
                 ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
 
-                ctx.vr.reset_low_intensity_grads()
-
                 volume_grad[i] = torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev))
                 tf_grad[i] = torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev))
                 lf_grad[i] = torch.nan_to_num(ctx.vr.cam_pos.grad.to_torch(device=dev))
@@ -715,8 +719,6 @@ class RaycastFunction(torch.autograd.Function):
             ctx.vr.raycast.grad(ctx.sampling_rate)
             ctx.vr.compute_rays.grad()
             ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
-
-            ctx.vr.reset_low_intensity_grads()
 
             return None, \
                 torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)), \
@@ -792,6 +794,7 @@ class Raycaster(torch.nn.Module):
                 # First reorder to (C, H, W), then flip Y to correct orientation
                 rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device), self.vr.depth.to_torch(device=volume.device).unsqueeze(-1)], dim=-1)
                 return torch.flip(rgbad, (1, )).permute(2, 1, 0).contiguous()
+                
 
     def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
         ''' seeks to mimic raycast_nondiff, but using the raycast method of the Volume raycaster
