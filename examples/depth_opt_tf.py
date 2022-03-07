@@ -3,6 +3,7 @@ from random import randint
 import torch
 import torch.nn.functional as F
 from torchvtk.datasets import TorchDataset
+from torchvtk.rendering import plot_comp_render_tf
 
 import numpy as np
 
@@ -11,6 +12,16 @@ from differender.volume_raycaster import Raycaster
 
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
+
+
+def save_comparison_fig(tup):
+    i, pred_im, targ_im, pred_tf, targ_tf, log_str = tup
+    fig = plot_comp_render_tf([(pred_im, pred_tf, 'Prediction'),
+                                (targ_im, targ_tf, 'Target')])
+    fig.suptitle(log_str, fontsize=16)
+    fig.savefig(f'examples/results/comparison_plot_{i:03d}.png', dpi=100)
+    fig.clear()
+    plt.close(fig)
 
 
 if __name__ == '__main__':
@@ -40,7 +51,6 @@ if __name__ == '__main__':
             im_gt = raycaster.raycast_nondiff(vol.detach(), tf_gt.detach(), lf.detach(), sampling_rate=sr)
             depth_gt = im_gt.squeeze()[4]
             vr.set_gtd(torch.flip(depth_gt, (0,)))
-            vr.visualize_tf('tf_original.png')
 
     for i in range(ITERATIONS):
           
@@ -52,28 +62,18 @@ if __name__ == '__main__':
         print(f"Step {i:03d}: MSE-LOSS: {mse_loss.detach().item():.6e}")
         mse_loss.backward()
 
-
-        # get tf graphic and ray visulaisation
-        if i % 10 == 0:
-            raycaster.vr.visualize_tf(f"tf_step_{i}.png")
-
-            randi = randint(30, 90)
-            randj = randint(30, 90)
-
-            raycaster.vr.visualize_ray('a', randi, randj, f"raysample_step_{i}_at_{randi}_{randj}.png")
-
         opt.step()
 
         with torch.no_grad():
             tf.clamp_(0.0, 1.0)
 
-        # create a control image for gt and raycasting
         if i % 50 == 0:
             with torch.no_grad():
-                control1 = torch.unsqueeze(depth_gt.detach(), 0).expand(3, 128, 128).permute(1, 2, 0).cpu().numpy()
-                control2 = torch.unsqueeze(depth_res.detach(), 0).expand(3, 128, 128).permute(1, 2, 0).cpu().numpy()
-                fig, axs = plt.subplots(1, 2)
-                axs = axs.flat
-                axs[0].imshow(control1)
-                axs[1].imshow(control2)
-                fig.savefig(f'control_step_{i}.png', bbox_inches='tight')
+                gt = torch.clamp(depth_gt.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
+                pred =torch.clamp(depth_res.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
+                tf_pred = tf.detach().cpu()
+                targ_tf = tf_gt.detach().cpu()
+                save_comparison_fig((i, pred, gt, tf_pred, targ_tf, f"Step {i}: Loss {mse_loss.detach().item():0.4f}."))
+
+        
+    

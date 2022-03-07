@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from enum import IntEnum
 from typing import Union, Tuple
+from torchvtk.rendering import plot_tfs
 
 @ti.func
 def low_high_frac(x: float):
@@ -605,14 +606,7 @@ class VolumeRaycaster():
             fig.savefig(filename, bbox_inches='tight')
 
     def visualize_tf(self, filename=None):
-        fig, ax = plt.subplots()
-        tf_np = self.tf_tex.to_numpy()
-        tfg_np = self.tf_tex.grad.to_numpy()
-        #ax.plot(tf_np[:, 0], 'r-')
-        #ax.plot(tf_np[:, 1], 'g-')
-        #ax.plot(tf_np[:, 2], 'b-')
-        ax.plot(tf_np[:, 3], 'k-')
-        ax.plot(tfg_np[:, 3], 'r-')
+        fig = plot_tfs([self.tf_tex.to_torch(device="cpu:0"), self.tf_tex.grad.to_torch(device="cpu:0")], ["Transfer Function", "Gradients"])
         if filename is None:
             fig.savefig('tf.png', bbox_inches='tight')
         else:
