@@ -714,8 +714,9 @@ class DepthRaycaster(VolumeRaycaster):
                 mode (Mode): Rendering mode (Standard or different depth modes)
             '''
         for i, j in self.valid_sample_step_count:  # For all pixels
-            maximum, max_grad = 0.0, 0.0
-            d_fh, d_mo= 0.0, 0.0
+            maximum = 0.0
+            max_grad = tl.vec3(0.0)
+            d_fh, d_mo = 0.0, 0.0
             d_ww = tl.vec3(0.0)
             d_mg = tl.vec3(0.0)
 
