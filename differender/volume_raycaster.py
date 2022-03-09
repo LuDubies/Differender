@@ -690,9 +690,10 @@ class DepthRaycaster(VolumeRaycaster):
         super().__init__(volume_resolution, render_resolution, max_samples, tf_resolution, fov, nearfar)
 
         render_tiles = tuple(map(lambda x: x // 8, render_resolution))
-        self.depth = ti.Vector.field(4, dtype=ti.f32)
+        self.depth = ti.Vector.field(3, dtype=ti.f32)
         self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-        ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
+        self.alpha = ti.Vector.field(3, dtype=ti.f32) # save alpha at the 3 distances in depth
+        ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth, self.alpha)
         ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
 
     @ti.func
@@ -714,10 +715,14 @@ class DepthRaycaster(VolumeRaycaster):
             '''
         for i, j in self.valid_sample_step_count:  # For all pixels
             maximum, max_grad = 0.0, 0.0
-            d_fh, d_mo, d_mg, d_ww = 0.0, 0.0, 0.0, 0.0
+            d_fh, d_mo= 0.0, 0.0
+            d_ww = tl.vec3(0.0)
+            d_mg = tl.vec3(0.0)
 
             # WYSIWYP fields
-            biggest_jump = 0.0
+            biggest_jump = tl.vec3(0.0)
+            interval_alpha = tl.vec3(0.0)
+            maxgrad_alpha = tl.vec3(0.0)
             interval_start = 0
             interval_start_acc_opac = 0.0
             current_d = 0.0
@@ -770,9 +775,26 @@ class DepthRaycaster(VolumeRaycaster):
                         maximum = sample_color.w
                     # Max Gradient
                     grad = new_agg_sample.w - old_agg_opacity
-                    if grad > max_grad:
-                        d_mg = depth
-                        max_grad = grad
+
+                    if grad > max_grad.x:
+                        max_grad.z = max_grad.y
+                        maxgrad_alpha.z = maxgrad_alpha.y
+                        max_grad.y = max_grad.x
+                        maxgrad_alpha.y = maxgrad_alpha.x
+                        max_grad.x = grad
+                        maxgrad_alpha.x = old_agg_opacity
+                        d_mg.x = depth
+                    elif grad > max_grad.y:
+                        max_grad.z = max_grad.y
+                        maxgrad_alpha.z = maxgrad_alpha.y
+                        max_grad.y = grad
+                        maxgrad_alpha.y = old_agg_opacity
+                        d_mg.y = depth
+                    elif grad > max_grad.z:
+                        max_grad.z = grad
+                        maxgrad_alpha.z = old_agg_opacity
+                        d_mg.z = depth
+
                     # WYSIWYP
                     # calculate current derivative and dd (and think about better notation)
                     current_d = new_agg_sample.w - old_agg_opacity
@@ -781,10 +803,27 @@ class DepthRaycaster(VolumeRaycaster):
                     # check for interval end (dd up from negative or ray end or ray finished)
                     if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
                             new_agg_sample.w >= 0.99:
-                        if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                            biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                        if new_agg_sample.w - interval_start_acc_opac > biggest_jump.x:
+                            biggest_jump.z = biggest_jump.y
+                            interval_alpha.z = interval_alpha.y
+                            biggest_jump.y = biggest_jump.x
+                            interval_alpha.y = interval_alpha.x
+                            biggest_jump.x = new_agg_sample.w - interval_start_acc_opac
+                            interval_alpha.x = interval_start_acc_opac
                             # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                            d_ww = self.get_depth_from_sx(interval_start, i, j)
+                            d_ww.x = self.get_depth_from_sx(interval_start, i, j)
+                        elif new_agg_sample.w - interval_start_acc_opac > biggest_jump.y:
+                            biggest_jump.z = biggest_jump.y
+                            interval_alpha.z = interval_alpha.y
+                            biggest_jump.y = new_agg_sample.w - interval_start_acc_opac
+                            interval_alpha.y = interval_start_acc_opac
+                            d_ww.y = self.get_depth_from_sx(interval_start, i, j)
+                        elif new_agg_sample.w - interval_start_acc_opac > biggest_jump.z:
+                            biggest_jump.z = new_agg_sample.w - interval_start_acc_opac
+                            interval_alpha.z = interval_start_acc_opac
+                            d_ww.z = self.get_depth_from_sx(
+                                interval_start, i, j)
+
 
                     # check for interval start (dd from 0 or neg to positive)
                     if last_dd <= 0.0 < current_dd:
@@ -795,7 +834,12 @@ class DepthRaycaster(VolumeRaycaster):
                     last_d = current_d
                     last_dd = current_dd
 
-                    self.depth[i,j] = tl.vec4(d_fh, d_mo, d_mg, d_ww)
+                    if mode == Mode.WYSIWYP:
+                        self.depth[i,j] = d_ww
+                        self.alpha[i,j] = interval_alpha
+                    elif mode == Mode.MaxGradient:
+                        self.depth[i, j] = d_mg
+                        self.alpha[i, j] = maxgrad_alpha
                     self.render_tape[i, j, 0] = new_agg_sample
 
 
@@ -830,7 +874,7 @@ class Raycaster(torch.nn.Module):
             if batched:  # Batched Input
                 result = torch.zeros(bs,
                                     *self.vr.resolution,
-                                    8,
+                                    10,
                                     dtype=torch.float32,
                                     device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
@@ -846,7 +890,8 @@ class Raycaster(torch.nn.Module):
                     self.vr.raycast_nondiff(sr, mode)
                     self.vr.get_final_image_nondiff()
                     result[i,...,:4] = self.vr.output_rgba.to_torch(device=volume.device)
-                    result[i,...,4:]  = self.vr.depth.to_torch(device=volume.device)
+                    result[i,...,4:7] = self.vr.depth.to_torch(device=volume.device)
+                    result[i,...,7:] = self.vr.alpha.to_torch(device=volume.device)
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
                 return torch.flip(result, (2,)).permute(0, 3, 2, 1).contiguous()
             else:
@@ -859,7 +904,9 @@ class Raycaster(torch.nn.Module):
                 self.vr.raycast_nondiff(sr, mode)
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
-                rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device), self.vr.depth.to_torch(device=volume.device)], dim=-1)
+                rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device),
+                                   self.vr.depth.to_torch(device=volume.device),
+                                   self.vr.alpha.to_torch(device=volume.device)], dim=-1)
                 return torch.flip(rgbad, (1, )).permute(2, 1, 0).contiguous()
 
     def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
