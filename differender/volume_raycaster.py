@@ -8,7 +8,7 @@ import taichi_glsl as tl
 import matplotlib.pyplot as plt
 import numpy as np
 from enum import IntEnum
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 from torchvtk.rendering import plot_tfs
 
 @ti.func
@@ -300,9 +300,23 @@ class VolumeRaycaster():
             self.sample_step_nums[i,j] = n_samples
 
     @ti.kernel
-    def raycast(self, sampling_rate: float):
+    def raycast(self, sampling_rate: float, mode: int):
         ''' Produce a rendering. Run compute_entry_exit first! '''
         for i, j in self.valid_sample_step_count:  # For all pixels
+            # variables for calculating different depths
+            maximum = 0.0
+            opacity, old_agg_opacity = 0.0, 0.0
+            new_agg_sample = tl.vec4(0.0)
+
+            # WYSIWYP fields
+            biggest_jump = 0.0
+            interval_start = 0
+            interval_start_acc_opac = 0.0
+            current_d = 0.0
+            last_d = 0.0
+            current_dd = 0.0
+            last_dd = 0.0
+
             for sample_idx in range(1, self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
                 if self.render_tape[i, j, sample_idx -1].w < 0.99 and sample_idx < ti.static(self.max_samples):
@@ -318,8 +332,7 @@ class VolumeRaycaster():
                     light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
                     intensity = self.sample_volume_trilinear(self.pos_tape[i,j, sample_idx])
                     sample_color = self.apply_transfer_function(intensity)
-                    opacity = 1.0 - ti.pow(1.0 - sample_color.w,
-                                           1.0 / sampling_rate)
+                    opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
 
                     normal = self.get_volume_normal(self.pos_tape[i,j, sample_idx])
                     light_dir = (self.pos_tape[i,j, sample_idx] - light_pos).normalized()  # Direction to light source
@@ -328,13 +341,49 @@ class VolumeRaycaster():
                     r = tl.reflect(light_dir, normal)  # Direction of reflected light
                     r_dot_v = max(r.dot(-vd), 0.0)
                     specular = self.specular * pow(r_dot_v, self.shininess)
-                    shaded_color = tl.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                    self.render_tape[i, j, sample_idx] = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * shaded_color + self.render_tape[i, j, sample_idx - 1]
+
+                    # render rgba image
+                    render_output = tl.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                    old_agg_opacity = self.rnder_tape[i, j, sample_idx - 1].w
+                    new_agg_sample = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * render_output + self.render_tape[i, j, sample_idx - 1]
                     self.valid_sample_step_count[i, j] += 1
 
                     # calculate depth information
-                    if sample_color.w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
-                        self.depth[i, j] = depth
+                    if mode == Mode.FirstHitDepth:
+                        if sample_color.w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
+                            self.depth[i, j] = depth
+                    elif mode == Mode.MaxOpacity:
+                        if sample_color.w > maximum and sample_color.w > 1e-3:
+                            self.depth[i, j] = depth
+                            maximum = sample_color.w
+                    elif mode == Mode.MaxGradient:
+                        grad = new_agg_sample.w - old_agg_opacity
+                        if grad > maximum:
+                            self.depth[i, j] = depth
+                            maximum = grad
+                    elif mode == Mode.WYSIWYP:
+                        # calculate current derivative and dd (and think about better notation)
+                        current_d = new_agg_sample.w - old_agg_opacity
+                        current_dd = current_d - last_d
+
+                        # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
+                        if (last_dd < 0.0 and current_dd >= 0.0) or sample_idx == self.sample_step_nums[i, j] - 1 or\
+                                new_agg_sample.w >= 0.99:
+                            if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
+                                biggest_jump = new_agg_sample.w - interval_start_acc_opac
+                                # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+
+                        # check for interval start (2nd derivative becomes positive)
+                        if last_dd <= 0.0 < current_dd:
+                            interval_start = sample_idx
+                            interval_start_acc_opac = new_agg_sample.w
+
+                        # save current values in last_fields
+                        last_d = current_d
+                        last_dd = current_dd
+
+                    self.render_tape[i, j, sample_idx] = new_agg_sample
 
                 else:
                     self.render_tape[i, j, sample_idx] = self.render_tape[i, j, sample_idx - 1]
@@ -348,6 +397,7 @@ class VolumeRaycaster():
             mode (Mode): Rendering mode (Standard or different depth modes)
         '''
         for i, j in self.valid_sample_step_count:  # For all pixels
+            # variables for calculating different depths
             maximum = 0.0           
             opacity, old_agg_opacity = 0.0, 0.0
             new_agg_sample = tl.vec4(0.0)
@@ -377,6 +427,7 @@ class VolumeRaycaster():
                     intensity = self.sample_volume_trilinear(pos)
                     sample_color = self.apply_transfer_function(intensity)
                     opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
+
                     if sample_color.w > 1e-3:
                         normal = self.get_volume_normal(pos)
                         light_dir = (pos - light_pos).normalized()  # Direction to light source
@@ -386,7 +437,7 @@ class VolumeRaycaster():
                         r_dot_v = max(r.dot(-vd), 0.0)
                         specular = self.specular * pow(r_dot_v, self.shininess)
 
-                        # render normal image
+                        # render rgba image
                         render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                         old_agg_opacity = self.render_tape[i, j, 0].w
                         new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
@@ -490,10 +541,9 @@ class VolumeRaycaster():
     @ti.kernel
     def transfer_depth_gradients_to_render_tape(self):
         ''' calculate gradients for samples that have depth-defying opacity '''
-        for i,j in self.valid_sample_step_count:
+        for i, j in self.valid_sample_step_count:
             gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
             cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
-
 
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
@@ -506,6 +556,7 @@ class VolumeRaycaster():
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
+        """ Calculate a depth value for a given sample index on ray i, j."""
         tmax = self.exit[i, j]
         n_samples = self.sample_step_nums[i, j]
         ray_len = (tmax - self.entry[i, j])
@@ -515,6 +566,7 @@ class VolumeRaycaster():
 
     @ti.func
     def get_sx_from_depth(self, depth: float, i: int, j: int) -> int:
+        """ Calculate the nearest sample index for a given depth value on ray i, j. """
         n_samples = self.sample_step_nums[i, j]
         # if depth is 1 (backplane is hit) we return n_samples
         sx = -1
@@ -529,12 +581,6 @@ class VolumeRaycaster():
             sx = ti.cast(ti.floor(((dist - tmin) / (tmax-tmin)) * (n_samples - 1)), ti.i32)
             sx = tl.clamp(sx, 0, n_samples-1)
         return sx
-
-    @ti.kernel
-    def reset_low_intensity_grads(self):
-        self.tf_tex.grad[0].fill(0.0)
-        self.tf_tex.grad[1].fill(0.0)
-        self.tf_tex.grad[2].fill(0.0)
 
     @ti.kernel
     def fill_depth_sx_field(self):
@@ -612,11 +658,16 @@ class VolumeRaycaster():
         else:
             fig.savefig(filename, bbox_inches='tight')
 
+class Mode(IntEnum):
+    FirstHitDepth = 1
+    MaxOpacity = 2
+    MaxGradient = 3
+    WYSIWYP = 4
 
 class RaycastFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
-    def forward(ctx, vr, volume, tf, look_from, sampling_rate, batched, jitter=True):
+    def forward(ctx, vr, volume, tf, look_from, sampling_rate, batched, jitter=True, mode=Mode.FirstHitDepth):
         ''' Performs Volume Raycasting with the given `volume` and `tf`
 
         Args:
@@ -628,6 +679,7 @@ class RaycastFunction(torch.autograd.Function):
             sampling_rate (float): Sampling rate as multiplier to the Nyquist frequency
             batched (4-bool): Whether the input is batched (i.e. has an extra dimension or is a list) and a bool for each volume, tf and look_from
             jitter (bool, optional): Turn on ray jitter (random shift of ray starting points). Defaults to True.
+            mode (Mode, optional): Depth Mode. Defaults to FirstHitDepth.
 
         Returns:
             Tensor: Resulting rendered image of shape (C, H, W)
@@ -646,7 +698,7 @@ class RaycastFunction(torch.autograd.Function):
                 vr.clear_framebuffer()
                 vr.compute_rays()
                 vr.compute_intersections(sampling_rate , jitter)
-                vr.raycast(sampling_rate)
+                vr.raycast(sampling_rate, mode)
                 vr.get_final_image()
                 result[i,...,:4] = vr.output_rgba.to_torch(device=volume.device)
                 result[i,...,4]  = vr.depth.to_torch(device=volume.device)
@@ -660,7 +712,7 @@ class RaycastFunction(torch.autograd.Function):
             vr.clear_framebuffer()
             vr.compute_rays()
             vr.compute_intersections(sampling_rate , jitter)
-            vr.raycast(sampling_rate)
+            vr.raycast(sampling_rate, mode)
             vr.get_final_image()
             return torch.cat([vr.output_rgba.to_torch(device=volume.device), vr.depth.to_torch(device=volume.device).unsqueeze(-1)], dim=-1)
 
@@ -720,12 +772,6 @@ class RaycastFunction(torch.autograd.Function):
                 torch.nan_to_num(ctx.vr.cam_pos.grad.to_torch(device=dev)), \
                     None, None, None
     
-    
-class Mode(IntEnum):
-    FirstHitDepth = 1
-    MaxOpacity = 2
-    MaxGradient = 3
-    WYSIWYP = 4
 
 class Raycaster(torch.nn.Module):
     def __init__(self, volume_shape, output_shape, tf_shape, sampling_rate=1.0, jitter=True, max_samples=512,
@@ -755,11 +801,7 @@ class Raycaster(torch.nn.Module):
             batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
             sr = sampling_rate if sampling_rate is not None else 4.0 * self.sampling_rate
             if batched:  # Batched Input
-                result = torch.zeros(bs,
-                                    *self.vr.resolution,
-                                    5,
-                                    dtype=torch.float32,
-                                    device=volume.device)
+                result = torch.zeros(bs, *self.vr.resolution, 5, dtype=torch.float32, device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
                 # TF: Reorder to (BS, W, 4)
                 for i, vol, tf_, lf in zip(range(bs), vol_in, tf_in, lf_in):
@@ -795,31 +837,38 @@ class Raycaster(torch.nn.Module):
             depth renderings can then be extracted from the render tape instead of during the rendering process'''
         pass
 
-    def forward(self, volume, tf, look_from):
+    def forward(self, volume, tf, look_from, mode: Optional[Mode] = None):
         ''' Raycasts through `volume` using the transfer function `tf` from given camera position (volume is in [-1,1]^3, centered around 0)
 
         Args:
             volume (Tensor): Volume Tensor of shape ([BS,] 1, D, H, W)
             tf (Tensor): Transfer Function Texture of shape ([BS,] 4, W)
             look_from (Tensor): Camera position of shape ([BS,] 3)
+            mode (Optional[Mode]: Depth Mode
 
         Returns:
             Tensor: Rendered image of shape ([BS,] 4, H, W)
         '''
         batched, bs, vol_in, tf_in, lf_in = self._determine_batch(volume, tf, look_from)
-        if batched: # Anything batched Batched
+        if mode is None:
+            if self.mode is not None:
+                mode = self.mode
+            else:
+                mode = Mode.FirstHitDepth
+
+        if batched:  # Anything batched Batched
             return torch.flip(
-                RaycastFunction.apply(self.vr, vol_in, tf_in, lf_in, self.sampling_rate, (batched, bs), self.jitter),
-                (2,) # First reorder render to (BS, C, H, W), then flip Y to correct orientation
+                RaycastFunction.apply(self.vr, vol_in, tf_in, lf_in, self.sampling_rate,
+                                      (batched, bs), self.jitter, mode),
+                (2,)  # First reorder render to (BS, C, H, W), then flip Y to correct orientation
             ).permute(0, 3, 2, 1).contiguous()
         else:
             return torch.flip(
                 RaycastFunction.apply(self.vr, vol_in, tf_in, lf_in,
                                       self.sampling_rate, (batched, bs),
-                                      self.jitter),
-                (1,) # First reorder to (C, H, W), then flip Y to correct orientation
+                                      self.jitter, mode),
+                (1,)  # First reorder to (C, H, W), then flip Y to correct orientation
             ).permute(2, 1, 0).contiguous()
-
 
     def _determine_batch(self, volume, tf, look_from):
         ''' Determines whether there's a batched input and returns lists of non-batched inputs.
