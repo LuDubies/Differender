@@ -299,6 +299,39 @@ class VolumeRaycaster():
             self.exit[i,j] = tmax
             self.sample_step_nums[i,j] = n_samples
 
+    @ti.func
+    def get_pos_parameters(self, i, j, idx, lf):
+        tmax = self.exit[i, j]
+        n_samples = self.sample_step_nums[i, j]
+        ray_len = (tmax - self.entry[i, j])
+        tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
+        dist = tl.mix(tmin, tmax, float(idx) / float(n_samples - 1))
+        depth = dist / self.far
+        vd = self.rays[i, j]
+        pos = lf + dist * vd
+
+        return depth, vd, pos
+
+    @ti.func
+    def sample_for_color_and_opacity(self, sr, pos):
+        intensity = self.sample_volume_trilinear(pos)
+        sample_color = self.apply_transfer_function(intensity)
+        opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sr)
+        return sample_color, opacity
+
+    @ti.func
+    def get_shading(self, vd, pos, lf):
+        light_pos = lf + tl.vec3(0.0, 1.0, 0.0)
+        normal = self.get_volume_normal(pos)
+        light_dir = (pos - light_pos).normalized()  # Direction to light source
+        n_dot_l = max(normal.dot(light_dir), 0.0)
+        diffuse = self.diffuse * n_dot_l
+        r = tl.reflect(light_dir, normal)  # Direction of reflected light
+        r_dot_v = max(r.dot(-vd), 0.0)
+        specular = self.specular * pow(r_dot_v, self.shininess)
+        return diffuse, specular
+
+
     @ti.kernel
     def raycast(self, sampling_rate: float, mode: int):
         ''' Produce a rendering. Run compute_entry_exit first! '''
@@ -320,31 +353,16 @@ class VolumeRaycaster():
             for sample_idx in range(1, self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
                 if self.render_tape[i, j, sample_idx -1].w < 0.99 and sample_idx < ti.static(self.max_samples):
-                    tmax = self.exit[i, j]
-                    n_samples = self.sample_step_nums[i, j]
-                    ray_len = (tmax - self.entry[i, j])
-                    tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
-                    dist = tl.mix(tmin, tmax, float(sample_idx) / float(n_samples - 1))
-                    depth = dist / self.far
-                    vd = self.rays[i, j]
-                    self.pos_tape[i,j, sample_idx] = look_from + dist * vd  # Current Pos
+                    depth, vd, pos = self.get_pos_parameters(i, j, sample_idx, look_from)     
+                    self.pos_tape[i,j, sample_idx] = pos  # Current Pos
 
-                    light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
-                    intensity = self.sample_volume_trilinear(self.pos_tape[i,j, sample_idx])
-                    sample_color = self.apply_transfer_function(intensity)
-                    opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
+                    sample_color, opacity = self.sample_for_color_and_opacity(sampling_rate, pos)
 
-                    normal = self.get_volume_normal(self.pos_tape[i,j, sample_idx])
-                    light_dir = (self.pos_tape[i,j, sample_idx] - light_pos).normalized()  # Direction to light source
-                    n_dot_l = max(normal.dot(light_dir), 0.0)
-                    diffuse = self.diffuse * n_dot_l
-                    r = tl.reflect(light_dir, normal)  # Direction of reflected light
-                    r_dot_v = max(r.dot(-vd), 0.0)
-                    specular = self.specular * pow(r_dot_v, self.shininess)
+                    diffuse, specular = self.get_shading(vd, pos, look_from)
 
                     # render rgba image
                     render_output = tl.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
-                    old_agg_opacity = self.rnder_tape[i, j, sample_idx - 1].w
+                    old_agg_opacity = self.render_tape[i, j, sample_idx - 1].w
                     new_agg_sample = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * render_output + self.render_tape[i, j, sample_idx - 1]
                     self.valid_sample_step_count[i, j] += 1
 
@@ -414,28 +432,13 @@ class VolumeRaycaster():
             for cnt in range(self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
                 if self.render_tape[i, j, 0].w < 0.99:
-                    tmax = self.exit[i, j]      # letztes sample am austrittsort?
-                    n_samples = self.sample_step_nums[i, j]
-                    ray_len = (tmax - self.entry[i, j])
-                    tmin = self.entry[i, j] + 0.5 * ray_len / n_samples  # Offset tmin as t_start
-                    dist = tl.mix(tmin, tmax, float(cnt) / float(n_samples - 1))
-                    depth = dist / self.far
-                    vd = self.rays[i, j]
-                    pos = look_from + dist * vd  # Current Pos
 
-                    light_pos = look_from + tl.vec3(0.0, 1.0, 0.0)
-                    intensity = self.sample_volume_trilinear(pos)
-                    sample_color = self.apply_transfer_function(intensity)
-                    opacity = 1.0 - ti.pow(1.0 - sample_color.w, 1.0 / sampling_rate)
+                    depth, vd, pos = self.get_pos_parameters(i, j, cnt, look_from)
+
+                    sample_color, opacity = self.sample_for_color_and_opacity(sampling_rate, pos)
 
                     if sample_color.w > 1e-3:
-                        normal = self.get_volume_normal(pos)
-                        light_dir = (pos - light_pos).normalized()  # Direction to light source
-                        n_dot_l = max(normal.dot(light_dir), 0.0)
-                        diffuse = self.diffuse * n_dot_l
-                        r = tl.reflect(light_dir, normal)  # Direction of reflected light
-                        r_dot_v = max(r.dot(-vd), 0.0)
-                        specular = self.specular * pow(r_dot_v, self.shininess)
+                        diffuse, specular = self.get_shading(vd, pos, look_from)
 
                         # render rgba image
                         render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
@@ -540,11 +543,12 @@ class VolumeRaycaster():
 
     @ti.kernel
     def transfer_depth_gradients_to_render_tape(self):
-        ''' calculate gradients for samples that have depth-defying opacity '''
+        ''' Place gradients for samples that have depth-defying opacity in the render tape. '''
         for i, j in self.valid_sample_step_count:
             gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
             cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
 
+            
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
                 self.render_tape.grad[i, j, gt_sx] = tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
@@ -552,6 +556,7 @@ class VolumeRaycaster():
             if cd_sx < gt_sx:
                 #    [cd_sx: gt_sx) need to decrease opacity at cd_sx
                 self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
+
             
 
     @ti.func
@@ -688,6 +693,7 @@ class RaycastFunction(torch.autograd.Function):
         ctx.sampling_rate = sampling_rate
         ctx.batched, ctx.bs = batched
         ctx.jitter = jitter
+        ctx.mode = mode
         if ctx.batched: # Batched Input
             ctx.save_for_backward(volume, tf, look_from) # unwrap tensor if it's a list
             result = torch.zeros(ctx.bs, *vr.resolution, 4, dtype=torch.float32, device=volume.device)
@@ -739,13 +745,13 @@ class RaycastFunction(torch.autograd.Function):
                 # Forward
                 ctx.vr.compute_rays()
                 ctx.vr.compute_intersections(ctx.sampling_rate , ctx.jitter)
-                ctx.vr.raycast(ctx.sampling_rate)
+                ctx.vr.raycast(ctx.sampling_rate, ctx.mode)
                 ctx.vr.get_final_image()
 
                 # Backward
                 ctx.vr.depth.grad.from_torch(grad_output[i,..., 4])
                 ctx.vr.transfer_depth_gradients_to_render_tape()
-                ctx.vr.raycast.grad(ctx.sampling_rate)
+                ctx.vr.raycast.grad(ctx.sampling_rate, int(ctx.mode))
                 # print('Output RGBA', torch.nan_to_num(ctx.vr.output_rgba.grad.to_torch(device=dev)).abs().max())
                 # print('Render Tape', torch.nan_to_num(ctx.vr.render_tape.grad.to_torch(device=dev)).abs().max())
                 # print('TF', torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)).abs().max())
@@ -762,7 +768,7 @@ class RaycastFunction(torch.autograd.Function):
             ctx.vr.clear_grad()
             ctx.vr.depth.grad.from_torch(grad_output[..., 4])
             ctx.vr.transfer_depth_gradients_to_render_tape()
-            ctx.vr.raycast.grad(ctx.sampling_rate)
+            ctx.vr.raycast.grad(ctx.sampling_rate, int(ctx.mode))
             ctx.vr.compute_rays.grad()
             ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
 
