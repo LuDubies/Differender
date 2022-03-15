@@ -671,6 +671,7 @@ class Mode(IntEnum):
     MaxOpacity = 2
     MaxGradient = 3
     WYSIWYP = 4
+    MIDA = 5
 
 
 @ti.data_oriented
@@ -692,9 +693,13 @@ class DepthRaycaster(VolumeRaycaster):
         render_tiles = tuple(map(lambda x: x // 8, render_resolution))
         self.depth = ti.Vector.field(3, dtype=ti.f32)
         self.depth_tape = ti.field(ti.f32)  # tape to record depth so far for every sample, need to be able to check prev measured depth
-        self.alpha = ti.Vector.field(3, dtype=ti.f32) # save alpha at the 3 distances in depth
-        ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth, self.alpha)
+        self.rgba_layer1 = ti.Vector.field(4, dtype=ti.f32)
+        self.rgba_layer2 = ti.Vector.field(4, dtype=ti.f32)
+        self.rgba_layer3 = ti.Vector.field(4, dtype=ti.f32)
+
+        ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
         ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
+        ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.rgba_layer1, self.rgba_layer2, self.rgba_layer3)
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -704,6 +709,14 @@ class DepthRaycaster(VolumeRaycaster):
         tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
         dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
         return dist / self.far
+
+    def clear_framebuffer(self):
+        super().clear_framebuffer()
+        self.depth.fill(tl.vec3(0.0))
+        self.rgba_layer1.fill(tl.vec4(0.0))
+        self.rgba_layer2.fill(tl.vec4(0.0))
+        self.rgba_layer3.fill(tl.vec4(0.0))
+
 
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float, mode: int):
@@ -719,6 +732,9 @@ class DepthRaycaster(VolumeRaycaster):
             d_fh, d_mo = 0.0, 0.0
             d_ww = tl.vec3(0.0)
             d_mg = tl.vec3(0.0)
+            mida_beta = 1.0
+            mida_betas = tl.vec3(1.0)
+            d_mida = tl.vec3(0.0)
 
             # WYSIWYP fields
             biggest_jump = tl.vec3(0.0)
@@ -758,11 +774,14 @@ class DepthRaycaster(VolumeRaycaster):
                         r = tl.reflect(light_dir, normal)  # Direction of reflected light
                         r_dot_v = max(r.dot(-vd), 0.0)
                         specular = self.specular * pow(r_dot_v, self.shininess)
-
+                        if mode == 5: # MIDA
+                            mida_beta = 1.0 - max(sample_color.w - maximum, 0.0)
+                        else:
+                            mida_beta = 1.0
                         # fill render tape according to selected mode
                         render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                         old_agg_opacity = self.render_tape[i, j, 0].w
-                        new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
+                        new_agg_sample = (1.0 - mida_beta * self.render_tape[i, j, 0].w) * render_output + mida_beta * self.render_tape[i, j, 0]
                     else:
                         old_agg_opacity = self.render_tape[i,j, 0].w
                         new_agg_sample = self.render_tape[i,j, 0]
@@ -795,6 +814,27 @@ class DepthRaycaster(VolumeRaycaster):
                         max_grad.z = grad
                         maxgrad_alpha.z = old_agg_opacity
                         d_mg.z = depth
+
+                    if mode == 5:
+                        if mida_beta < mida_betas.x:
+                            mida_betas.z = mida_betas.y
+                            self.rgba_layer3[i,j] = self.rgba_layer2[i,j]
+                            mida_betas.y = mida_betas.x
+                            self.rgba_layer2[i,j] = self.rgba_layer1[i,j]
+                            mida_betas.x = mida_beta
+                            self.rgba_layer1[i,j] = self.render_tape[i,j,0]
+                            d_mida.x = depth
+                        elif mida_beta < mida_betas.y:
+                            mida_betas.z = mida_betas.y
+                            self.rgba_layer3[i,j] = self.rgba_layer2[i,j]
+                            mida_betas.y = mida_beta
+                            self.rgba_layer2[i,j] = self.render_tape[i,j,0]
+                            d_mida.y = depth
+                        elif mida_beta < mida_betas.z:
+                            mida_betas.z = mida_beta
+                            self.rgba_layer3[i,j] = self.render_tape[i,j,0]
+                            d_mida.z = depth
+
 
                     # WYSIWYP
                     # calculate current derivative and dd (and think about better notation)
@@ -837,10 +877,10 @@ class DepthRaycaster(VolumeRaycaster):
 
                     if mode == Mode.WYSIWYP:
                         self.depth[i,j] = d_ww
-                        self.alpha[i,j] = interval_alpha
                     elif mode == Mode.MaxGradient:
                         self.depth[i, j] = d_mg
-                        self.alpha[i, j] = maxgrad_alpha
+                    elif mode == Mode.MIDA:
+                        self.depth[i, j] = d_mida
                     self.render_tape[i, j, 0] = new_agg_sample
 
 
@@ -875,7 +915,7 @@ class Raycaster(torch.nn.Module):
             if batched:  # Batched Input
                 result = torch.zeros(bs,
                                     *self.vr.resolution,
-                                    10,
+                                    19,
                                     dtype=torch.float32,
                                     device=volume.device)
                 # Volume: remove intensity dim, reorder to (BS, W, H, D)
@@ -890,9 +930,12 @@ class Raycaster(torch.nn.Module):
                     self.vr.compute_intersections_nondiff(sr, False)
                     self.vr.raycast_nondiff(sr, mode)
                     self.vr.get_final_image_nondiff()
-                    result[i,...,:4] = self.vr.output_rgba.to_torch(device=volume.device)
-                    result[i,...,4:7] = self.vr.depth.to_torch(device=volume.device)
-                    result[i,...,7:] = self.vr.alpha.to_torch(device=volume.device)
+                    result[i,...,  :4] = self.vr.output_rgba.to_torch(device=volume.device)
+                    result[i,..., 4:7] = self.vr.depth.to_torch(device=volume.device)
+                    result[i,..., 7:11] = self.vr.rgba_layer1.to_torch(device=volume.device)
+                    result[i,...,11:15] = self.vr.rgba_layer2.to_torch(device=volume.device)
+                    result[i,...,15:19] = self.vr.rgba_layer3.to_torch(device=volume.device)
+
                 # First reorder render to (BS, C, H, W), then flip Y to correct orientation
                 return torch.flip(result, (2,)).permute(0, 3, 2, 1).contiguous()
             else:
@@ -907,7 +950,10 @@ class Raycaster(torch.nn.Module):
                 # First reorder to (C, H, W), then flip Y to correct orientation
                 rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device),
                                    self.vr.depth.to_torch(device=volume.device),
-                                   self.vr.alpha.to_torch(device=volume.device)], dim=-1)
+                                   self.vr.rgba_layer1.to_torch(device=volume.device),
+                                   self.vr.rgba_layer2.to_torch(device=volume.device),
+                                   self.vr.rgba_layer3.to_torch(device=volume.device),
+                                   ], dim=-1)
                 return torch.flip(rgbad, (1, )).permute(2, 1, 0).contiguous()
 
     def raycast_notorch(self, volume, tf, look_from, sampling_rate=None):
