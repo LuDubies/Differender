@@ -719,7 +719,7 @@ class DepthRaycaster(VolumeRaycaster):
 
 
     @ti.kernel
-    def raycast_nondiff(self, sampling_rate: float, mode: int):
+    def raycast_nondiff(self, sampling_rate: float, mode: int, layer_dist_thresh: float):
         ''' Raycasts in a non-differentiable (but faster and cleaner) way. Use `get_final_image_nondiff` with this.
 
             Args:
@@ -741,12 +741,17 @@ class DepthRaycaster(VolumeRaycaster):
             interval_alpha = tl.vec3(0.0)
             maxgrad_alpha = tl.vec3(0.0)
             interval_start = 0
-            interval_start_acc_opac = 0.0
+            interval_start_acc_rgba = tl.vec4(0.0)
             current_d = 0.0
             last_d = 0.0
             current_dd = 0.0
             last_dd = 0.0
             new_agg_sample = tl.vec4(0.0)
+            old_agg_sample = tl.vec4(0.0)
+            layer1 = tl.vec4(0.0)
+            layer2 = tl.vec4(0.0)
+            layer3 = tl.vec4(0.0)
+
 
             for cnt in range(self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
@@ -781,10 +786,12 @@ class DepthRaycaster(VolumeRaycaster):
                         # fill render tape according to selected mode
                         render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                         old_agg_opacity = self.render_tape[i, j, 0].w
+                        old_agg_sample = self.render_tape[i, j, 0]
                         new_agg_sample = (1.0 - mida_beta * self.render_tape[i, j, 0].w) * render_output + mida_beta * self.render_tape[i, j, 0]
                     else:
                         old_agg_opacity = self.render_tape[i,j, 0].w
                         new_agg_sample = self.render_tape[i,j, 0]
+                        old_agg_sample = new_agg_sample
 
                     # First hit
                     if sample_color.w > 1e-3 and d_fh == 0.0:
@@ -796,43 +803,45 @@ class DepthRaycaster(VolumeRaycaster):
                     # Max Gradient
                     grad = new_agg_sample.w - old_agg_opacity
 
-                    if grad > max_grad.x:
-                        max_grad.z = max_grad.y
-                        maxgrad_alpha.z = maxgrad_alpha.y
-                        max_grad.y = max_grad.x
-                        maxgrad_alpha.y = maxgrad_alpha.x
-                        max_grad.x = grad
-                        maxgrad_alpha.x = old_agg_opacity
-                        d_mg.x = depth
-                    elif grad > max_grad.y:
-                        max_grad.z = max_grad.y
-                        maxgrad_alpha.z = maxgrad_alpha.y
-                        max_grad.y = grad
-                        maxgrad_alpha.y = old_agg_opacity
-                        d_mg.y = depth
-                    elif grad > max_grad.z:
-                        max_grad.z = grad
-                        maxgrad_alpha.z = old_agg_opacity
-                        d_mg.z = depth
+                    if mode == Mode.MaxGradient:
+                        if grad > max_grad.x:
+                            max_grad.z = max_grad.y
+                            layer3 = layer2
+                            max_grad.y = max_grad.x
+                            layer2 = layer1
+                            max_grad.x = grad
+                            layer1 = old_agg_sample
+                            d_mg.x = depth
+                        elif grad > max_grad.y:
+                            max_grad.z = max_grad.y
+                            layer3 = layer2
+                            max_grad.y = grad
+                            layer2 = old_agg_sample
+                            d_mg.y = depth
+                        elif grad > max_grad.z:
+                            max_grad.z = grad
+                            layer3 = old_agg_sample
+                            d_mg.z = depth
 
-                    if mode == 5:
+                    mida_dist = min(depth - d_mida.x, depth - d_mida.y, depth - d_mida.z)
+                    if mode == Mode.MIDA and mida_dist > layer_dist_thresh:
                         if mida_beta < mida_betas.x:
                             mida_betas.z = mida_betas.y
-                            self.rgba_layer3[i,j] = self.rgba_layer2[i,j]
+                            layer3 = layer2
                             mida_betas.y = mida_betas.x
-                            self.rgba_layer2[i,j] = self.rgba_layer1[i,j]
+                            layer2 = layer1
                             mida_betas.x = mida_beta
-                            self.rgba_layer1[i,j] = self.render_tape[i,j,0]
+                            layer1 = old_agg_sample
                             d_mida.x = depth
                         elif mida_beta < mida_betas.y:
                             mida_betas.z = mida_betas.y
-                            self.rgba_layer3[i,j] = self.rgba_layer2[i,j]
+                            layer3 = layer2
                             mida_betas.y = mida_beta
-                            self.rgba_layer2[i,j] = self.render_tape[i,j,0]
+                            layer2 = old_agg_sample
                             d_mida.y = depth
                         elif mida_beta < mida_betas.z:
                             mida_betas.z = mida_beta
-                            self.rgba_layer3[i,j] = self.render_tape[i,j,0]
+                            layer3 = old_agg_sample
                             d_mida.z = depth
 
 
@@ -842,34 +851,42 @@ class DepthRaycaster(VolumeRaycaster):
                     current_dd = current_d - last_d
 
                     # check for interval end (dd up from negative or ray end or ray finished)
-                    if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
-                            new_agg_sample.w >= 0.99:
-                        if new_agg_sample.w - interval_start_acc_opac > biggest_jump.x:
-                            biggest_jump.z = biggest_jump.y
-                            interval_alpha.z = interval_alpha.y
-                            biggest_jump.y = biggest_jump.x
-                            interval_alpha.y = interval_alpha.x
-                            biggest_jump.x = new_agg_sample.w - interval_start_acc_opac
-                            interval_alpha.x = interval_start_acc_opac
-                            # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                            d_ww.x = self.get_depth_from_sx(interval_start, i, j)
-                        elif new_agg_sample.w - interval_start_acc_opac > biggest_jump.y:
-                            biggest_jump.z = biggest_jump.y
-                            interval_alpha.z = interval_alpha.y
-                            biggest_jump.y = new_agg_sample.w - interval_start_acc_opac
-                            interval_alpha.y = interval_start_acc_opac
-                            d_ww.y = self.get_depth_from_sx(interval_start, i, j)
-                        elif new_agg_sample.w - interval_start_acc_opac > biggest_jump.z:
-                            biggest_jump.z = new_agg_sample.w - interval_start_acc_opac
-                            interval_alpha.z = interval_start_acc_opac
-                            d_ww.z = self.get_depth_from_sx(
-                                interval_start, i, j)
+                    wysiwyp_dist = min(depth - d_ww.x, depth - d_ww.y, depth - d_ww.z)
+                    if mode == Mode.WYSIWYP and wysiwyp_dist > layer_dist_thresh:
+                        if (last_dd < 0.0 and current_dd >= 0.0) or cnt == self.sample_step_nums[i, j] - 1 or\
+                                new_agg_sample.w >= 0.99:
+                            if new_agg_sample.w - interval_start_acc_rgba.w > biggest_jump.x:
+                                biggest_jump.z = biggest_jump.y
+                                interval_alpha.z = interval_alpha.y
+                                layer3 = layer2
+                                biggest_jump.y = biggest_jump.x
+                                interval_alpha.y = interval_alpha.x
+                                layer2 = layer1
+                                biggest_jump.x = new_agg_sample.w - interval_start_acc_rgba.w
+                                interval_alpha.x = interval_start_acc_rgba.w
+                                layer1 = interval_start_acc_rgba
+                                # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                                d_ww.x = self.get_depth_from_sx(interval_start, i, j)
+                            elif new_agg_sample.w - interval_start_acc_rgba.w > biggest_jump.y:
+                                biggest_jump.z = biggest_jump.y
+                                interval_alpha.z = interval_alpha.y
+                                layer3 = layer2
+                                biggest_jump.y = new_agg_sample.w - interval_start_acc_rgba.w
+                                interval_alpha.y = interval_start_acc_rgba.w
+                                layer2 = interval_start_acc_rgba
+                                d_ww.y = self.get_depth_from_sx(interval_start, i, j)
+                            elif new_agg_sample.w - interval_start_acc_rgba.w > biggest_jump.z:
+                                biggest_jump.z = new_agg_sample.w - interval_start_acc_rgba.w
+                                interval_alpha.z = interval_start_acc_rgba.w
+                                layer3 = interval_start_acc_rgba
+                                d_ww.z = self.get_depth_from_sx(
+                                    interval_start, i, j)
 
 
                     # check for interval start (dd from 0 or neg to positive)
                     if last_dd <= 0.0 < current_dd:
                         interval_start = cnt
-                        interval_start_acc_opac = new_agg_sample.w
+                        interval_start_acc_rgba = new_agg_sample
 
                     # save current values in last_fields
                     last_d = current_d
@@ -881,7 +898,11 @@ class DepthRaycaster(VolumeRaycaster):
                         self.depth[i, j] = d_mg
                     elif mode == Mode.MIDA:
                         self.depth[i, j] = d_mida
+
                     self.render_tape[i, j, 0] = new_agg_sample
+                    self.rgba_layer1[i, j] = layer1
+                    self.rgba_layer2[i, j] = layer2
+                    self.rgba_layer3[i, j] = layer3
 
 
 class Raycaster(torch.nn.Module):
@@ -902,7 +923,7 @@ class Raycaster(torch.nn.Module):
         self.vr = DepthRaycaster(self.volume_shape, output_shape, max_samples=max_samples, tf_resolution=self.tf_shape,
          fov=fov, nearfar=(near, far), background_color=background_color)
 
-    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None, mode: Union[None, Mode] = None):
+    def raycast_nondiff(self, volume, tf, look_from, sampling_rate=None, mode: Union[None, Mode] = None, layer_dist_thresh=1e-2):
         if mode is None:
             if self.mode is not None:
                 mode = self.mode
@@ -928,7 +949,7 @@ class Raycaster(torch.nn.Module):
                     self.vr.clear_framebuffer()
                     self.vr.compute_rays()
                     self.vr.compute_intersections_nondiff(sr, False)
-                    self.vr.raycast_nondiff(sr, mode)
+                    self.vr.raycast_nondiff(sr, mode, layer_dist_thresh)
                     self.vr.get_final_image_nondiff()
                     result[i,...,  :4] = self.vr.output_rgba.to_torch(device=volume.device)
                     result[i,..., 4:7] = self.vr.depth.to_torch(device=volume.device)
@@ -945,7 +966,7 @@ class Raycaster(torch.nn.Module):
                 self.vr.clear_framebuffer()
                 self.vr.compute_rays()
                 self.vr.compute_intersections_nondiff(sr, False)
-                self.vr.raycast_nondiff(sr, mode)
+                self.vr.raycast_nondiff(sr, mode, layer_dist_thresh)
                 self.vr.get_final_image_nondiff()
                 # First reorder to (C, H, W), then flip Y to correct orientation
                 rgbad = torch.cat([self.vr.output_rgba.to_torch(device=volume.device),
