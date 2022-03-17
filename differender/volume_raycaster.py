@@ -333,22 +333,12 @@ class VolumeRaycaster():
 
 
     @ti.kernel
-    def raycast(self, sampling_rate: float, mode: int):
+    def raycast(self, sampling_rate: float):
         ''' Produce a rendering. Run compute_entry_exit first! '''
         for i, j in self.valid_sample_step_count:  # For all pixels
             # variables for calculating different depths
-            maximum = 0.0
-            opacity, old_agg_opacity = 0.0, 0.0
+            opacity = 0.0
             new_agg_sample = tl.vec4(0.0)
-
-            # WYSIWYP fields
-            biggest_jump = 0.0
-            interval_start = 0
-            interval_start_acc_opac = 0.0
-            current_d = 0.0
-            last_d = 0.0
-            current_dd = 0.0
-            last_dd = 0.0
 
             for sample_idx in range(1, self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
@@ -365,46 +355,60 @@ class VolumeRaycaster():
                     old_agg_opacity = self.render_tape[i, j, sample_idx - 1].w
                     new_agg_sample = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * render_output + self.render_tape[i, j, sample_idx - 1]
                     self.valid_sample_step_count[i, j] += 1
-
-                    # calculate depth information
-                    if mode == Mode.FirstHitDepth:
-                        if sample_color.w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
-                            self.depth[i, j] = depth
-                    elif mode == Mode.MaxOpacity:
-                        if sample_color.w > maximum and sample_color.w > 1e-3:
-                            self.depth[i, j] = depth
-                            maximum = sample_color.w
-                    elif mode == Mode.MaxGradient:
-                        grad = new_agg_sample.w - old_agg_opacity
-                        if grad > maximum:
-                            self.depth[i, j] = depth
-                            maximum = grad
-                    elif mode == Mode.WYSIWYP:
-                        # calculate current derivative and dd (and think about better notation)
-                        current_d = new_agg_sample.w - old_agg_opacity
-                        current_dd = current_d - last_d
-
-                        # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
-                        if (last_dd < 0.0 and current_dd >= 0.0) or sample_idx == self.sample_step_nums[i, j] - 1 or\
-                                new_agg_sample.w >= 0.99:
-                            if new_agg_sample.w - interval_start_acc_opac > biggest_jump:
-                                biggest_jump = new_agg_sample.w - interval_start_acc_opac
-                                # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
-
-                        # check for interval start (2nd derivative becomes positive)
-                        if last_dd <= 0.0 < current_dd:
-                            interval_start = sample_idx
-                            interval_start_acc_opac = new_agg_sample.w
-
-                        # save current values in last_fields
-                        last_d = current_d
-                        last_dd = current_dd
-
                     self.render_tape[i, j, sample_idx] = new_agg_sample
-
                 else:
                     self.render_tape[i, j, sample_idx] = self.render_tape[i, j, sample_idx - 1]
+
+    @ti.kernel
+    def calculate_depth(self, mode: int):
+        # run after raycast
+
+        for i, j in self.valid_sample_step_count:  # For all pixels
+            maximum = 0.0  # for the max modes
+
+            # WYSIWYP fields
+            biggest_jump = 0.0
+            interval_start = 0
+            interval_start_acc_opac = 0.0
+            current_d = 0.0
+            last_d = 0.0
+            current_dd = 0.0
+            last_dd = 0.0
+
+            for sample_idx in range(1, self.sample_step_nums[i, j]):
+                depth, _, _ = self.get_pos_parameters(i, j, sample_idx, self.cam_pos[None])
+                
+                if mode == Mode.FirstHitDepth:
+                    if self.render_tape[i, j, sample_idx].w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
+                        self.depth[i, j] = depth
+                if mode == Mode.MaxGradient:
+                    grad = self.render_tape[i, j, sample_idx].w - self.render_tape[i, j, sample_idx - 1].w
+                    if grad > maximum:
+                        self.depth[i, j] = depth
+                        maximum = grad
+                if mode == Mode.WYSIWYP:
+                    # calculate current derivative and dd (and think about better notation)
+                    current_d = self.render_tape[i, j, sample_idx].w - self.render_tape[i, j, sample_idx - 1].w
+                    current_dd = current_d - last_d
+
+                    # check for interval end (2nd derivative changes from negative to zero or positive or ray end or ray finished)
+                    if (last_dd < 0.0 and current_dd >= 0.0) or sample_idx == self.sample_step_nums[i, j] - 1 or\
+                            self.render_tape[i, j, sample_idx].w >= 0.99:
+                        if self.render_tape[i, j, sample_idx].w - interval_start_acc_opac > biggest_jump:
+                            biggest_jump = self.render_tape[i, j, sample_idx].w - interval_start_acc_opac
+                            # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
+                            self.depth[i, j] = self.get_depth_from_sx(interval_start, i, j)
+
+                    # check for interval start (2nd derivative becomes positive)
+                    if last_dd <= 0.0 < current_dd:
+                        interval_start = sample_idx
+                        interval_start_acc_opac = self.render_tape[i, j, sample_idx].w
+
+                    # save current values in last_fields
+                    last_d = current_d
+                    last_dd = current_dd
+
+
 
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float, mode: int):
@@ -434,9 +438,8 @@ class VolumeRaycaster():
                 if self.render_tape[i, j, 0].w < 0.99:
 
                     depth, vd, pos = self.get_pos_parameters(i, j, cnt, look_from)
-
                     sample_color, opacity = self.sample_for_color_and_opacity(sampling_rate, pos)
-
+                    
                     if sample_color.w > 1e-3:
                         diffuse, specular = self.get_shading(vd, pos, look_from)
 
@@ -547,7 +550,6 @@ class VolumeRaycaster():
         for i, j in self.valid_sample_step_count:
             gt_sx = self.get_sx_from_depth(self.ground_truth_depth[i, j], i, j)  # ground truth depth index
             cd_sx = self.get_sx_from_depth(self.depth[i, j], i, j)  # actual depth index
-
             
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
@@ -556,8 +558,6 @@ class VolumeRaycaster():
             if cd_sx < gt_sx:
                 #    [cd_sx: gt_sx) need to decrease opacity at cd_sx
                 self.render_tape.grad[i, j, cd_sx] =  tl.vec4(0.0, 0.0, 0.0, -self.depth.grad[i, j])
-
-            
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -703,8 +703,9 @@ class RaycastFunction(torch.autograd.Function):
                 vr.set_tf_tex(tf_)
                 vr.clear_framebuffer()
                 vr.compute_rays()
-                vr.compute_intersections(sampling_rate , jitter)
-                vr.raycast(sampling_rate, mode)
+                vr.compute_intersections(sampling_rate, jitter)
+                vr.raycast(sampling_rate)
+                vr.calculate_depth(mode)
                 vr.get_final_image()
                 result[i,...,:4] = vr.output_rgba.to_torch(device=volume.device)
                 result[i,...,4]  = vr.depth.to_torch(device=volume.device)
@@ -717,8 +718,9 @@ class RaycastFunction(torch.autograd.Function):
             vr.set_tf_tex(tf)
             vr.clear_framebuffer()
             vr.compute_rays()
-            vr.compute_intersections(sampling_rate , jitter)
-            vr.raycast(sampling_rate, mode)
+            vr.compute_intersections(sampling_rate, jitter)
+            vr.raycast(sampling_rate)
+            vr.calculate_depth(mode)
             vr.get_final_image()
             return torch.cat([vr.output_rgba.to_torch(device=volume.device), vr.depth.to_torch(device=volume.device).unsqueeze(-1)], dim=-1)
 
@@ -744,14 +746,15 @@ class RaycastFunction(torch.autograd.Function):
 
                 # Forward
                 ctx.vr.compute_rays()
-                ctx.vr.compute_intersections(ctx.sampling_rate , ctx.jitter)
-                ctx.vr.raycast(ctx.sampling_rate, ctx.mode)
+                ctx.vr.compute_intersections(ctx.sampling_rate, ctx.jitter)
+                ctx.vr.raycast(ctx.sampling_rate)
+                ctx.vr.calculate_depth(ctx.mode)
                 ctx.vr.get_final_image()
 
                 # Backward
                 ctx.vr.depth.grad.from_torch(grad_output[i,..., 4])
                 ctx.vr.transfer_depth_gradients_to_render_tape()
-                ctx.vr.raycast.grad(ctx.sampling_rate, int(ctx.mode))
+                ctx.vr.raycast.grad(ctx.sampling_rate)
                 # print('Output RGBA', torch.nan_to_num(ctx.vr.output_rgba.grad.to_torch(device=dev)).abs().max())
                 # print('Render Tape', torch.nan_to_num(ctx.vr.render_tape.grad.to_torch(device=dev)).abs().max())
                 # print('TF', torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)).abs().max())
@@ -762,13 +765,13 @@ class RaycastFunction(torch.autograd.Function):
                 volume_grad[i] = torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev))
                 tf_grad[i] = torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev))
                 lf_grad[i] = torch.nan_to_num(ctx.vr.cam_pos.grad.to_torch(device=dev))
-            return None, volume_grad, tf_grad, lf_grad, None, None, None
+            return None, volume_grad, tf_grad, lf_grad, None, None, None, None
 
         else: # Non-batched, single item
             ctx.vr.clear_grad()
             ctx.vr.depth.grad.from_torch(grad_output[..., 4])
             ctx.vr.transfer_depth_gradients_to_render_tape()
-            ctx.vr.raycast.grad(ctx.sampling_rate, int(ctx.mode))
+            ctx.vr.raycast.grad(ctx.sampling_rate)
             ctx.vr.compute_rays.grad()
             ctx.vr.compute_intersections.grad(ctx.sampling_rate , ctx.jitter)
 
@@ -776,7 +779,7 @@ class RaycastFunction(torch.autograd.Function):
                 torch.nan_to_num(ctx.vr.volume.grad.to_torch(device=dev)), \
                 torch.nan_to_num(ctx.vr.tf_tex.grad.to_torch(device=dev)), \
                 torch.nan_to_num(ctx.vr.cam_pos.grad.to_torch(device=dev)), \
-                    None, None, None
+                    None, None, None, None
     
 
 class Raycaster(torch.nn.Module):

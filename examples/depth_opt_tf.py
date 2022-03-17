@@ -8,10 +8,11 @@ from torchvtk.rendering import plot_comp_render_tf
 import numpy as np
 
 from differender.utils import get_tf, in_circles
-from differender.volume_raycaster import Raycaster
+from differender.volume_raycaster import Raycaster, Mode
 
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
+import os
 
 
 def save_comparison_fig(tup):
@@ -25,27 +26,27 @@ def save_comparison_fig(tup):
 
 
 if __name__ == '__main__':
+    os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 
     ITERATIONS = 401
 
+    #torch.autograd.set_detect_anomaly(True)
 
     vol_ds = TorchDataset('C:/Users/luca/Repos/Differender/vtk_dat/')
     vol = vol_ds[1]['vol'].float()
     sr = 16.0
 
     raycaster = Raycaster(vol.shape[-3:], (128, 128), 128, jitter=False, sampling_rate=1.0, max_samples=2048,
-                            ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True}, far=5.0)
+                            ti_kwargs={'device_memory_GB': 4.0,'debug': True, 'excepthook': True}, far=5.0, mode = Mode.WYSIWYP)
 
     vol = vol.to('cuda')
-    tf_gt = get_tf('bones', 128).to('cuda')
-    tf = get_tf('gray', 128).to('cuda').requires_grad_(True)
+    tf_gt = get_tf('tf1', 128).to('cuda')
+    tf = get_tf('bones', 128).to('cuda').requires_grad_(True)
     lf = in_circles(1.7 * math.pi).float().to('cuda')
 
     vr = raycaster.vr
 
     opt = torch.optim.AdamW([tf], weight_decay=1e-3)
-
-    #torch.autograd.set_detect_anomaly(True)
     
     with torch.no_grad():
             im_gt = raycaster.raycast_nondiff(vol.detach(), tf_gt.detach(), lf.detach(), sampling_rate=sr)
@@ -67,7 +68,7 @@ if __name__ == '__main__':
         with torch.no_grad():
             tf.clamp_(0.0, 1.0)
 
-        if i % 50 == 0:
+        if i % 25 == 0:
             with torch.no_grad():
                 gt = torch.clamp(depth_gt.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
                 pred =torch.clamp(depth_res.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
