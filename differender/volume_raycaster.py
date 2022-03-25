@@ -729,7 +729,7 @@ class DepthRaycaster(VolumeRaycaster):
         for i, j in self.valid_sample_step_count:  # For all pixels
             maximum = 0.0
             max_grad = tl.vec3(0.0)
-            d_fh, d_mo = 0.0, 0.0
+            d_fh, d_mo = 1.0, 1.0
             d_ww = tl.vec3(0.0)
             d_mg = tl.vec3(0.0)
             mida_beta = 1.0
@@ -794,7 +794,7 @@ class DepthRaycaster(VolumeRaycaster):
                         old_agg_sample = new_agg_sample
 
                     # First hit
-                    if sample_color.w > 1e-3 and d_fh == 0.0:
+                    if sample_color.w > 1e-3 and d_fh == 1.0:
                         d_fh = depth
                     # Max Opacity
                     if sample_color.w > 1e-3 and sample_color.w > maximum:
@@ -822,7 +822,7 @@ class DepthRaycaster(VolumeRaycaster):
                             max_grad.z = grad
                             layer3 = old_agg_sample
                             d_mg.z = depth
-
+                    
                     mida_dist = min(depth - d_mida.x, depth - d_mida.y, depth - d_mida.z)
                     if mode == Mode.MIDA and mida_dist > layer_dist_thresh:
                         if mida_beta < mida_betas.x:
@@ -863,10 +863,16 @@ class DepthRaycaster(VolumeRaycaster):
                                 interval_alpha.y = interval_alpha.x
                                 layer2 = layer1
                                 biggest_jump.x = new_agg_sample.w - interval_start_acc_rgba.w
-                                interval_alpha.x = interval_start_acc_rgba.w
-                                layer1 = interval_start_acc_rgba
                                 # take start of interval (could also take depth from cnt - (cnt-last_interval_start) / 2)
-                                d_ww.x = self.get_depth_from_sx(interval_start, i, j)
+                                interval_start_depth = self.get_depth_from_sx(interval_start, i, j)
+                                if interval_start_depth == d_fh: # if first interval, save end of interval
+                                    interval_alpha.x = new_agg_sample.w
+                                    layer1 = new_agg_sample
+                                    d_ww.x = depth
+                                else:
+                                    interval_alpha.x = interval_start_acc_rgba.w
+                                    layer1 = interval_start_acc_rgba
+                                    d_ww.x = self.get_depth_from_sx(interval_start, i, j)
                             elif new_agg_sample.w - interval_start_acc_rgba.w > biggest_jump.y:
                                 biggest_jump.z = biggest_jump.y
                                 interval_alpha.z = interval_alpha.y
@@ -903,6 +909,10 @@ class DepthRaycaster(VolumeRaycaster):
                     self.rgba_layer1[i, j] = layer1
                     self.rgba_layer2[i, j] = layer2
                     self.rgba_layer3[i, j] = layer3
+            # End Ray
+            if self.depth[i,j].x == 0.0:
+                self.depth[i,j].x = 1.0
+            self.depth[i,j].z = d_fh
 
 
 class Raycaster(torch.nn.Module):
