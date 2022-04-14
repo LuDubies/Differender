@@ -382,7 +382,7 @@ class VolumeRaycaster():
                     if self.render_tape[i, j, sample_idx].w > 1e-3 and self.depth[i, j] == self.no_hit_depth:
                         self.depth[i, j] = depth
                 if mode == Mode.MaxOpacity:
-                    last_acc = self.renderr_tape[i, j, sample_idx - 1]
+                    last_acc = self.render_tape[i, j, sample_idx - 1]
                     current_sample = (self.render_tape[i, j, sample_idx] - last_acc) / (1.0 - last_acc.w)
                     if current_sample.w > maximum and current_sample.w > 1e-3:
                         self.depth[i, j] = depth
@@ -413,8 +413,6 @@ class VolumeRaycaster():
                     # save current values in last_fields
                     last_d = current_d
                     last_dd = current_dd
-
-
 
     @ti.kernel
     def raycast_nondiff(self, sampling_rate: float, mode: int):
