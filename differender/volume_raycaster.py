@@ -696,10 +696,12 @@ class DepthRaycaster(VolumeRaycaster):
         self.rgba_layer1 = ti.Vector.field(4, dtype=ti.f32)
         self.rgba_layer2 = ti.Vector.field(4, dtype=ti.f32)
         self.rgba_layer3 = ti.Vector.field(4, dtype=ti.f32)
+        self.ray = ti.Vector.field(4, dtype=ti.f32)
 
         ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.depth)
         ti.root.dense(ti.ijk, (*render_tiles, max_samples)).dense(ti.ijk, (8, 8, 1)).place(self.depth_tape)
         ti.root.dense(ti.ij, render_tiles).dense(ti.ij, (8, 8)).place(self.rgba_layer1, self.rgba_layer2, self.rgba_layer3)
+        ti.root.dense(ti.i, max_samples).place(self.ray)
 
     @ti.func
     def get_depth_from_sx(self, sample_index: int, i: int, j: int) -> float:
@@ -909,6 +911,8 @@ class DepthRaycaster(VolumeRaycaster):
                     self.rgba_layer1[i, j] = layer1
                     self.rgba_layer2[i, j] = layer2
                     self.rgba_layer3[i, j] = layer3
+                    if i == self.depth.shape[0] // 2 and j == self.depth.shape[1] // 2:
+                        self.ray[cnt] = tl.vec4(sample_color.w, new_agg_sample.w, interval_start, mida_beta)
             # End Ray
             if self.depth[i,j].x == 0.0:
                 self.depth[i,j].x = 1.0
