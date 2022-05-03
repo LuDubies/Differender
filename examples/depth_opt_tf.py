@@ -32,7 +32,7 @@ if __name__ == '__main__':
 
     #torch.autograd.set_detect_anomaly(True)
 
-    vol_ds = TorchDataset('C:/Users/luca/Repos/Differender/vtk_dat/')
+    vol_ds = TorchDataset('/run/media/dome/Data/data/torchvtk/CQ500')
     vol = vol_ds[1]['vol'].float()
     sr = 16.0
 
@@ -49,16 +49,14 @@ if __name__ == '__main__':
     opt = torch.optim.AdamW([tf], weight_decay=1e-3)
     
     with torch.no_grad():
-            im_gt = raycaster.raycast_nondiff(vol.detach(), tf_gt.detach(), lf.detach(), sampling_rate=sr)
-            depth_gt = im_gt.squeeze()[4]
-            vr.set_gtd(torch.flip(depth_gt, (0,)))
+        im_gt = raycaster.raycast_nondiff(vol.detach(), tf_gt.detach(), lf.detach(), sampling_rate=sr)
 
     for i in range(ITERATIONS):
           
         opt.zero_grad()
-        res = raycaster(vol, tf, lf)
+        res = raycaster(vol, tf, lf, depth_gt=im_gt[:, [4]])
         depth_res = res.squeeze()[4]
-        mse_loss = F.mse_loss(depth_res, depth_gt)
+        mse_loss = F.mse_loss(res, im_gt)
         
         print(f"Step {i:03d}: MSE-LOSS: {mse_loss.detach().item():.6e}")
         mse_loss.backward()
@@ -68,9 +66,9 @@ if __name__ == '__main__':
         with torch.no_grad():
             tf.clamp_(0.0, 1.0)
 
-        if i % 25 == 0:
+        if i % 5 == 0:
             with torch.no_grad():
-                gt = torch.clamp(depth_gt.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
+                gt = torch.clamp(im_gt[0, 4].detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
                 pred =torch.clamp(depth_res.detach(), 0.0, 1.0).expand(3, 128, 128).cpu()
                 tf_pred = tf.detach().cpu()
                 targ_tf = tf_gt.detach().cpu()
