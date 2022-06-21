@@ -159,7 +159,7 @@ class VolumeRaycaster():
         self.cam_pos.from_torch(cam_pos.float())
 
     def set_gtd(self, gtd):
-        self.ground_truth_depth.from_torch(gtd)
+        self.ground_truth_depth.from_torch(gtd.float())
 
 #######################
 ### BASIC SAMPLERS  ###
