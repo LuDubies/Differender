@@ -1,10 +1,9 @@
 from turtle import color
 from numpy.core.fromnumeric import shape
-from taichi_glsl.sampling import D
 import torch
 from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 import taichi as ti
-import taichi_glsl as tl
+import taichi.math as tm
 import matplotlib.pyplot as plt
 import numpy as np
 from enum import IntEnum
@@ -15,6 +14,9 @@ from torchvtk.rendering import plot_tfs
 #################
 ### UTILITY   ###
 #################
+@ti.func
+def isnan(x):
+    return not (x >= 0 or x <= 0)
 @ti.func
 def low_high_frac(x: float):
     ''' Returns the integer value below and above, as well as the frac
@@ -41,10 +43,10 @@ def get_entry_exit_points(look_from, view_dir, bl, tr):
     ''' Computes the entry and exit points of a given ray
 
     Args:
-        look_from (tl.vec3): Camera Position as vec3
-        view_dir (tl.vec): View direction as vec3, normalized
-        bl (tl.vec3): Bottom left of the bounding box
-        tr (tl.vec3): Top right of the bounding box
+        look_from (tm.vec3): Camera Position as vec3
+        view_dir (tm.vec): View direction as vec3, normalized
+        bl (tm.vec3): Bottom left of the bounding box
+        tr (tm.vec3): Top right of the bounding box
 
     Returns:
         float, float, bool: Distance to entry, distance to exit, bool whether box is hit
@@ -119,7 +121,7 @@ class VolumeRaycaster():
         self.diffuse = 0.8
         self.specular = 0.3
         self.shininess = 32.0
-        self.light_color = tl.vec3(1.0)
+        self.light_color = tm.vec3(1.0)
         self.cam_pos = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
         self.cam_pos_field = ti.Vector.field(3, dtype=ti.f32, needs_grad=True)
 
@@ -170,14 +172,14 @@ class VolumeRaycaster():
         ''' Samples volume data at `pos` and trilinearly interpolates the value
 
         Args:
-            pos (tl.vec3): Position to sample the volume in [-1, 1]^3
+            pos (tm.vec3): Position to sample the volume in [-1, 1]^3
 
         Returns:
             float: Sampled interpolated intensity
         '''
-        pos = tl.clamp(
+        pos = tm.clamp(
             ((0.5 * pos) + 0.5), 0.0,
-            1.0) * ti.static(tl.vec3(*self.volume.shape) - 1.0 - 1e-4)
+            1.0) * (tm.vec3(*self.volume.shape) - 1.0 - 1e-4)
         x_low, x_high, x_frac = low_high_frac(pos.x)
         y_low, y_high, y_frac = low_high_frac(pos.y)
         z_low, z_high, z_frac = low_high_frac(pos.z)
@@ -188,34 +190,34 @@ class VolumeRaycaster():
         # on z_low
         v000 = self.volume[x_low, y_low, z_low]
         v100 = self.volume[x_high, y_low, z_low]
-        x_val_y_low = tl.mix(v000, v100, x_frac)
+        x_val_y_low = tm.mix(v000, v100, x_frac)
         v010 = self.volume[x_low, y_high, z_low]
         v110 = self.volume[x_high, y_high, z_low]
-        x_val_y_high = tl.mix(v010, v110, x_frac)
-        xy_val_z_low = tl.mix(x_val_y_low, x_val_y_high, y_frac)
+        x_val_y_high = tm.mix(v010, v110, x_frac)
+        xy_val_z_low = tm.mix(x_val_y_low, x_val_y_high, y_frac)
         # on z_high
         v001 = self.volume[x_low, y_low, z_high]
         v101 = self.volume[x_high, y_low, z_high]
-        x_val_y_low = tl.mix(v001, v101, x_frac)
+        x_val_y_low = tm.mix(v001, v101, x_frac)
         v011 = self.volume[x_low, y_high, z_high]
         v111 = self.volume[x_high, y_high, z_high]
-        x_val_y_high = tl.mix(v011, v111, x_frac)
-        xy_val_z_high = tl.mix(x_val_y_low, x_val_y_high, y_frac)
-        return tl.mix(xy_val_z_low, xy_val_z_high, z_frac)
+        x_val_y_high = tm.mix(v011, v111, x_frac)
+        xy_val_z_high = tm.mix(x_val_y_low, x_val_y_high, y_frac)
+        return tm.mix(xy_val_z_low, xy_val_z_high, z_frac)
 
     @ti.func
     def get_volume_normal(self, pos):
         delta = 1e-3
-        x_delta = tl.vec3(delta, 0.0, 0.0)
-        y_delta = tl.vec3(0.0, delta, 0.0)
-        z_delta = tl.vec3(0.0, 0.0, delta)
+        x_delta = tm.vec3(delta, 0.0, 0.0)
+        y_delta = tm.vec3(0.0, delta, 0.0)
+        z_delta = tm.vec3(0.0, 0.0, delta)
         dx = self.sample_volume_trilinear(
             pos + x_delta) - self.sample_volume_trilinear(pos - x_delta)
         dy = self.sample_volume_trilinear(
             pos + y_delta) - self.sample_volume_trilinear(pos - y_delta)
         dz = self.sample_volume_trilinear(
             pos + z_delta) - self.sample_volume_trilinear(pos - z_delta)
-        return tl.vec3(dx, dy, dz).normalized()
+        return tm.vec3(dx, dy, dz).normalized()
 
     @ti.func
     def apply_transfer_function(self, intensity: float):
@@ -225,11 +227,11 @@ class VolumeRaycaster():
             intensity (float): Intensity in [0,1]
 
         Returns:
-            tl.vec4: Color and opacity for given `intensity`
+            tm.vec4: Color and opacity for given `intensity`
         '''
         length = ti.static(float(self.tf_tex.shape[0] - 1))
         low, high, frac = low_high_frac(intensity * length)
-        return tl.mix(
+        return tm.mix(
             self.tf_tex[low],
             self.tf_tex[min(high, ti.static(self.tf_tex.shape[0] - 1))], frac)
 
@@ -242,14 +244,14 @@ class VolumeRaycaster():
         for i,j in self.rays:
             max_x = ti.static(float(self.rays.shape[0]))
             max_y = ti.static(float(self.rays.shape[1]))
-            up = ti.static(tl.vec3(0.0, 1.0, 0.0))
+            up = tm.vec3(0.0, 1.0, 0.0)
             # Shift to 0 center
             u = (float(i) + 0.5) / max_x - 0.5
             v = (float(j) + 0.5) / max_y - 0.5
             # Compute up & right, as well as near plane extents
             view_dir = (-self.cam_pos[None]).normalized()
-            right = tl.cross(view_dir, up).normalized()
-            up = tl.cross(right, view_dir).normalized()
+            right = tm.cross(view_dir, up).normalized()
+            up = tm.cross(right, view_dir).normalized()
             near_h = 2.0 * ti.tan(self.fov_rad) * self.near
             near_w = near_h * self.aspect
             near_m = self.cam_pos[None] + self.near * view_dir
@@ -260,7 +262,7 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_rays_backward(self):
         for i,j in self.rays:
-            if tl.length(self.rays[i,j]) > 1e-8:
+            if tm.length(self.rays[i,j]) > 1e-8:
                 updated_ray = (self.rays[i,j] - self.rays.grad[i,j]).normalized()
                 pix_pos = self.cam_pos[None] + self.rays[i, j] * self.entry[i, j]
                 new_campos = pix_pos - updated_ray * (self.entry[i,j] - self.entry.grad[i,j])
@@ -270,9 +272,9 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_intersections(self, sampling_rate: float, jitter: int):
         for i,j in self.entry:
-            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
-            bb_bl = ti.static(tl.vec3(-1.0))
-            bb_tr = ti.static(tl.vec3( 1.0))
+            vol_diag = (tm.vec3(*self.volume.shape) - tm.vec3(1.0)).norm()
+            bb_bl = tm.vec3(-1.0)
+            bb_tr = tm.vec3( 1.0)
             tmin, tmax, hit = get_entry_exit_points(self.cam_pos[None], self.rays[i,j], bb_bl, bb_tr)
 
             n_samples = 1
@@ -285,9 +287,9 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_intersections_nondiff(self, sampling_rate: float, jitter: int):
         for i,j in self.entry:
-            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
-            bb_bl = ti.static(tl.vec3(-1.0))
-            bb_tr = ti.static(tl.vec3( 1.0))
+            vol_diag = (tm.vec3(*self.volume.shape) - tm.vec3(1.0)).norm()
+            bb_bl = tm.vec3(-1.0)
+            bb_tr = tm.vec3( 1.0)
             tmin, tmax, hit = get_entry_exit_points(self.cam_pos[None], self.rays[i,j], bb_bl, bb_tr)
 
             n_samples = 1
@@ -303,7 +305,7 @@ class VolumeRaycaster():
         n_samples = self.sample_step_nums[i, j]
         ray_len = (tmax - self.entry[i, j])
         tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
-        dist = tl.mix(tmin, tmax, float(idx) / float(n_samples - 1))
+        dist = tm.mix(tmin, tmax, float(idx) / float(n_samples - 1))
         depth = dist / self.far
         vd = self.rays[i, j]
         pos = lf + dist * vd
@@ -322,12 +324,12 @@ class VolumeRaycaster():
 ###################
     @ti.func
     def get_shading(self, vd, pos, lf):
-        light_pos = lf + tl.vec3(0.0, 1.0, 0.0)
+        light_pos = lf + tm.vec3(0.0, 1.0, 0.0)
         normal = self.get_volume_normal(pos)
         light_dir = (pos - light_pos).normalized()  # Direction to light source
         n_dot_l = max(normal.dot(light_dir), 0.0)
         diffuse = self.diffuse * n_dot_l
-        r = tl.reflect(light_dir, normal)  # Direction of reflected light
+        r = tm.reflect(light_dir, normal)  # Direction of reflected light
         r_dot_v = max(r.dot(-vd), 0.0)
         specular = self.specular * pow(r_dot_v, self.shininess)
         return diffuse, specular
@@ -338,7 +340,7 @@ class VolumeRaycaster():
         for i, j in self.valid_sample_step_count:  # For all pixels
             # variables for calculating different depths
             opacity = 0.0
-            new_agg_sample = tl.vec4(0.0)
+            new_agg_sample = tm.vec4(0.0)
 
             for sample_idx in range(1, self.sample_step_nums[i, j]):
                 look_from = self.cam_pos[None]
@@ -351,7 +353,7 @@ class VolumeRaycaster():
                     diffuse, specular = self.get_shading(vd, pos, look_from)
 
                     # render rgba image
-                    render_output = tl.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                    render_output = tm.vec4(ti.min(1.0, diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                     old_agg_opacity = self.render_tape[i, j, sample_idx - 1].w
                     new_agg_sample = (1.0 - self.render_tape[i, j, sample_idx - 1].w) * render_output + self.render_tape[i, j, sample_idx - 1]
                     self.valid_sample_step_count[i, j] += 1
@@ -371,7 +373,7 @@ class VolumeRaycaster():
             # variables for calculating different depths
             maximum = 0.0
             opacity, old_agg_opacity = 0.0, 0.0
-            new_agg_sample = tl.vec4(0.0)
+            new_agg_sample = tm.vec4(0.0)
 
             # WYSIWYP fields
             biggest_jump = 0.0
@@ -393,7 +395,7 @@ class VolumeRaycaster():
                         diffuse, specular = self.get_shading(vd, pos, look_from)
 
                         # render rgba image
-                        render_output = tl.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
+                        render_output = tm.vec4((diffuse + specular + self.ambient) * sample_color.xyz * opacity * self.light_color, opacity)
                         old_agg_opacity = self.render_tape[i, j, 0].w
                         new_agg_sample = (1.0 - self.render_tape[i, j, 0].w) * render_output + self.render_tape[i, j, 0]
                     else:
@@ -521,12 +523,12 @@ class VolumeRaycaster():
 
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
-                self.render_tape.grad[i, j, gt_sx] += tl.vec4(
+                self.render_tape.grad[i, j, gt_sx] += tm.vec4(
                     0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
             if cd_sx < gt_sx:
                 #    [cd_sx: gt_sx) need to decrease opacity at cd_sx
-                self.render_tape.grad[i, j, cd_sx] += tl.vec4(
+                self.render_tape.grad[i, j, cd_sx] += tm.vec4(
                     0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
     @ti.func
@@ -536,7 +538,7 @@ class VolumeRaycaster():
         n_samples = self.sample_step_nums[i, j]
         ray_len = (tmax - self.entry[i, j])
         tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
-        dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+        dist = tm.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
         return dist / self.far
 
     @ti.func
@@ -556,7 +558,7 @@ class VolumeRaycaster():
             sx = ti.cast(
                 ti.floor(((dist - tmin) / (tmax - tmin)) * (n_samples - 1)),
                 ti.i32)
-            sx = tl.clamp(sx, 0, n_samples - 1)
+            sx = tm.clamp(sx, 0, n_samples - 1)
         return sx
 
 
@@ -630,12 +632,12 @@ class VolumeRaycaster():
 
             if cd_sx > gt_sx:
                 #    [gt_sx: cd_sx) need to raise opacity at gtd
-                self.render_tape.grad[i, j, gt_sx] += tl.vec4(
+                self.render_tape.grad[i, j, gt_sx] += tm.vec4(
                     0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
             if cd_sx < gt_sx:
                 #    [cd_sx: gt_sx) need to decrease opacity at cd_sx
-                self.render_tape.grad[i, j, cd_sx] += tl.vec4(
+                self.render_tape.grad[i, j, cd_sx] += tm.vec4(
                     0.0, 0.0, 0.0, -self.depth.grad[i, j])
 
     @ti.func
@@ -645,7 +647,7 @@ class VolumeRaycaster():
         n_samples = self.sample_step_nums[i, j]
         ray_len = (tmax - self.entry[i, j])
         tmin = self.entry[i, j] + 0.5 * ray_len / n_samples
-        dist = tl.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
+        dist = tm.mix(tmin, tmax, float(sample_index) / float(n_samples - 1))
         return dist / self.far
 
     @ti.func
@@ -665,7 +667,7 @@ class VolumeRaycaster():
             sx = ti.cast(
                 ti.floor(((dist - tmin) / (tmax - tmin)) * (n_samples - 1)),
                 ti.i32)
-            sx = tl.clamp(sx, 0, n_samples - 1)
+            sx = tm.clamp(sx, 0, n_samples - 1)
         return sx
 
 
@@ -689,9 +691,9 @@ class VolumeRaycaster():
         ''' Retrieves the final image from the `render_tape` to `output_rgba`. '''
         for i, j in self.valid_sample_step_count:
             valid_sample_step_count = self.valid_sample_step_count[i, j] - 1
-            ns = tl.clamp(self.sample_step_nums[i, j], 1, self.max_samples-1)
+            ns = tm.clamp(self.sample_step_nums[i, j], 1, self.max_samples-1)
             rgba = self.render_tape[i, j, ns - 1]
-            self.output_rgba[i, j] += tl.vec4(tl.mix(rgba.xyz, tl.vec3(self.background_color), 1.0 - rgba.w), rgba.w)
+            self.output_rgba[i, j] += tm.vec4(tm.mix(rgba.xyz, tm.vec3(self.background_color), 1.0 - rgba.w), rgba.w)
             if valid_sample_step_count > self.max_valid_sample_step_count[None]:
                 self.max_valid_sample_step_count[
                     None] = valid_sample_step_count
@@ -699,33 +701,33 @@ class VolumeRaycaster():
     def clear_framebuffer(self):
         ''' Clears the framebuffer `output_rgba` and the `render_tape`'''
         self.max_valid_sample_step_count.fill(0)
-        self.render_tape.fill(tl.vec4(0.0))
+        self.render_tape.fill(tm.vec4(0.0))
         self.valid_sample_step_count.fill(1)
-        self.output_rgba.fill(tl.vec4(0.0))
+        self.output_rgba.fill(tm.vec4(0.0))
         self.depth.fill(self.no_hit_depth)
 
     def clear_grad(self):
         ti.sync()
-        self.cam_pos.grad.fill(tl.vec3(0.0))
+        self.cam_pos.grad.fill(tm.vec3(0.0))
         self.volume.grad.fill(0.0)
-        self.tf_tex.grad.fill(tl.vec4(0.0))
-        self.render_tape.grad.fill(tl.vec4(0.0))
-        self.pos_tape.grad.fill(tl.vec3(0.0))
-        self.output_rgba.grad.fill(tl.vec4(0.0))
+        self.tf_tex.grad.fill(tm.vec4(0.0))
+        self.render_tape.grad.fill(tm.vec4(0.0))
+        self.pos_tape.grad.fill(tm.vec3(0.0))
+        self.output_rgba.grad.fill(tm.vec4(0.0))
         self.entry.grad.fill(0.0)
         self.exit.grad.fill(0.0)
-        self.rays.grad.fill(tl.vec3(0.0))
+        self.rays.grad.fill(tm.vec3(0.0))
         self.depth.grad.fill(0.0)
 
     @ti.kernel
     def grad_nan_to_num(self):
-        self.cam_pos.grad[None] = tl.vec3(0.0)
+        self.cam_pos.grad[None] = tm.vec3(0.0)
         for i,j in self.rays.grad:
-            if any(tl.isnan(self.rays.grad[i,j])):
-                self.rays.grad[i,j] = tl.vec3(0.0)
-            if tl.isnan(self.entry.grad[i,j]):
+            if any(isnan(self.rays.grad[i,j])):
+                self.rays.grad[i,j] = tm.vec3(0.0)
+            if isnan(self.entry.grad[i,j]):
                 self.entry.grad[i,j] = 0.0
-            if tl.isnan(self.exit.grad[i,j]):
+            if isnan(self.exit.grad[i,j]):
                 self.exit.grad[i,j] = 0.0
 
 ##################################
