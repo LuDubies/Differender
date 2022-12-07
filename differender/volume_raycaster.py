@@ -161,7 +161,7 @@ class VolumeRaycaster():
         u = x - 0.5
         v = y - 0.5
 
-        up = ti.static(tl.vec3(0.0, 1.0, 0.0))
+        up = tl.vec3(0.0, 1.0, 0.0)
         right = tl.cross(view_dir, up).normalized()
         up = tl.cross(right, view_dir).normalized()
         near_h = 2.0 * ti.tan(self.fov_rad) * self.near
@@ -183,7 +183,7 @@ class VolumeRaycaster():
         '''
         pos = tl.clamp(
             ((0.5 * pos) + 0.5), 0.0,
-            1.0) * ti.static(tl.vec3(*self.volume.shape) - 1.0 - 1e-4)
+            1.0) * (tl.vec3(*self.volume.shape) - 1.0 - 1e-4)
         x_low, x_high, x_frac = low_high_frac(pos.x)
         y_low, y_high, y_frac = low_high_frac(pos.y)
         z_low, z_high, z_frac = low_high_frac(pos.z)
@@ -244,7 +244,7 @@ class VolumeRaycaster():
         for i,j in self.rays:
             max_x = ti.static(float(self.rays.shape[0]))
             max_y = ti.static(float(self.rays.shape[1]))
-            up = ti.static(tl.vec3(0.0, 1.0, 0.0))
+            up = tl.vec3(0.0, 1.0, 0.0)
             # Shift to 0 center
             u = (float(i) + 0.5) / max_x - 0.5
             v = (float(j) + 0.5) / max_y - 0.5
@@ -272,9 +272,9 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_intersections(self, sampling_rate: float, jitter: int):
         for i,j in self.entry:
-            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
-            bb_bl = ti.static(tl.vec3(-1.0))
-            bb_tr = ti.static(tl.vec3( 1.0))
+            vol_diag = (tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm()
+            bb_bl = tl.vec3(-1.0)
+            bb_tr = tl.vec3( 1.0)
             tmin, tmax, hit = get_entry_exit_points(self.cam_pos[None], self.rays[i,j], bb_bl, bb_tr)
 
             n_samples = 1
@@ -287,9 +287,9 @@ class VolumeRaycaster():
     @ti.kernel
     def compute_intersections_nondiff(self, sampling_rate: float, jitter: int):
         for i,j in self.entry:
-            vol_diag = ti.static((tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm())
-            bb_bl = ti.static(tl.vec3(-1.0))
-            bb_tr = ti.static(tl.vec3( 1.0))
+            vol_diag = (tl.vec3(*self.volume.shape) - tl.vec3(1.0)).norm()
+            bb_bl = tl.vec3(-1.0)
+            bb_tr = tl.vec3( 1.0)
             tmin, tmax, hit = get_entry_exit_points(self.cam_pos[None], self.rays[i,j], bb_bl, bb_tr)
 
             n_samples = 1
